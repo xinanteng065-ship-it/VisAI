@@ -1,0 +1,1233 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VisAI - あなた専用のニュース配信</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', Arial, 'Hiragino Kaku Gothic ProN', 'Hiragino Sans', Meiryo, sans-serif;
+            background: #f8f9fa;
+            color: #2c3e50;
+            line-height: 1.7;
+        }
+
+        @keyframes fadeInUp {
+            from {
+                opacity: 0;
+                transform: translateY(30px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        @keyframes float {
+            0%, 100% {
+                transform: translateY(0);
+            }
+            50% {
+                transform: translateY(-10px);
+            }
+        }
+
+        @keyframes pulse {
+            0%, 100% {
+                transform: scale(1);
+            }
+            50% {
+                transform: scale(1.05);
+            }
+        }
+
+        @keyframes glow {
+            0%, 100% {
+                box-shadow: 0 0 20px rgba(102, 126, 234, 0.3);
+            }
+            50% {
+                box-shadow: 0 0 30px rgba(102, 126, 234, 0.6);
+            }
+        }
+
+        /* ヘッダー */
+        header {
+            background: #fff;
+            border-bottom: 1px solid #e1e8ed;
+            padding: 1rem 1.5rem;
+            position: sticky;
+            top: 0;
+            z-index: 1000;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+        }
+
+        .header-content {
+            max-width: 1200px;
+            margin: 0 auto;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .logo {
+            font-size: 1.4rem;
+            font-weight: 700;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            background-clip: text;
+            -webkit-background-clip: text;
+            color: transparent;
+            -webkit-text-fill-color: transparent;
+            letter-spacing: -0.5px;
+        }
+
+        nav a {
+            margin-left: 1.5rem;
+            color: #5a6c7d;
+            text-decoration: none;
+            font-size: 0.9rem;
+            transition: color 0.2s;
+        }
+
+        nav a:hover {
+            color: #667eea;
+        }
+
+        /* ヒーローセクション */
+        .hero {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 5rem 1.5rem;
+            text-align: center;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .hero::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: radial-gradient(circle at 30% 50%, rgba(255,255,255,0.1) 0%, transparent 50%);
+            animation: float 6s ease-in-out infinite;
+        }
+
+        .hero-content {
+            max-width: 900px;
+            margin: 0 auto;
+            position: relative;
+            z-index: 1;
+        }
+
+        .hero h1 {
+            font-size: clamp(2.5rem, 6vw, 3.5rem);
+            font-weight: 700;
+            margin-bottom: 1.5rem;
+            letter-spacing: -1px;
+            animation: fadeInUp 0.8s ease-out;
+        }
+
+        .hero p {
+            font-size: clamp(1.1rem, 3vw, 1.4rem);
+            margin-bottom: 2.5rem;
+            opacity: 0.95;
+            font-weight: 300;
+            animation: fadeInUp 0.8s ease-out 0.2s backwards;
+        }
+
+        .cta-button {
+            display: inline-block;
+            background: white;
+            color: #667eea;
+            padding: 1.2rem 2.5rem;
+            border-radius: 50px;
+            font-size: 1.1rem;
+            font-weight: 600;
+            text-decoration: none;
+            transition: all 0.3s ease;
+            box-shadow: 0 8px 20px rgba(0,0,0,0.2);
+            cursor: pointer;
+            border: none;
+            animation: fadeInUp 0.8s ease-out 0.4s backwards, pulse 2s ease-in-out 1.2s infinite;
+        }
+
+        .cta-button:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 12px 30px rgba(0,0,0,0.3);
+        }
+
+        .badge {
+            display: inline-block;
+            background: rgba(255,255,255,0.2);
+            padding: 0.5rem 1rem;
+            border-radius: 20px;
+            font-size: 0.9rem;
+            margin-bottom: 1rem;
+            animation: fadeInUp 0.8s ease-out, glow 2s ease-in-out infinite;
+        }
+
+        /* プラン比較 */
+        .plans {
+            background: white;
+            padding: 5rem 1.5rem;
+        }
+
+        .section-title {
+            text-align: center;
+            font-size: clamp(2rem, 5vw, 2.5rem);
+            font-weight: 700;
+            color: #2c3e50;
+            margin-bottom: 1rem;
+        }
+
+        .section-subtitle {
+            text-align: center;
+            color: #5a6c7d;
+            font-size: clamp(1rem, 2vw, 1.2rem);
+            margin-bottom: 3rem;
+        }
+
+        .plans-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 2rem;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .plan-card {
+            background: #f8f9fa;
+            border: 2px solid #e1e8ed;
+            border-radius: 16px;
+            padding: 2.5rem;
+            transition: all 0.3s ease;
+            position: relative;
+            opacity: 0;
+            animation: fadeInUp 0.6s ease-out forwards;
+        }
+
+        .plan-card:nth-child(1) {
+            animation-delay: 0.1s;
+        }
+
+        .plan-card:nth-child(2) {
+            animation-delay: 0.3s;
+        }
+
+        .plan-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 12px 30px rgba(0,0,0,0.1);
+        }
+
+        .plan-card.premium {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+        }
+
+        .plan-card.premium .plan-price,
+        .plan-card.premium .plan-name,
+        .plan-card.premium .feature-item {
+            color: white;
+        }
+
+        .popular-badge {
+            position: absolute;
+            top: -15px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: #f59e0b;
+            color: white;
+            padding: 0.5rem 1.5rem;
+            border-radius: 20px;
+            font-size: 0.85rem;
+            font-weight: 600;
+        }
+
+        .plan-name {
+            font-size: 1.5rem;
+            font-weight: 600;
+            margin-bottom: 0.5rem;
+            color: #2c3e50;
+        }
+
+        .plan-price {
+            font-size: 3rem;
+            font-weight: 700;
+            margin-bottom: 0.5rem;
+            color: #667eea;
+        }
+
+        .plan-card.premium .plan-price {
+            color: white;
+        }
+
+        .plan-duration {
+            font-size: 0.9rem;
+            color: #5a6c7d;
+            margin-bottom: 2rem;
+        }
+
+        .plan-card.premium .plan-duration {
+            color: rgba(255,255,255,0.9);
+        }
+
+        .feature-list {
+            list-style: none;
+            margin-bottom: 2rem;
+        }
+
+        .feature-item {
+            padding: 0.8rem 0;
+            color: #5a6c7d;
+            display: flex;
+            align-items: center;
+            gap: 0.8rem;
+        }
+
+        .feature-item::before {
+            content: "✓";
+            color: #10b981;
+            font-weight: 700;
+            font-size: 1.2rem;
+        }
+
+        .plan-card.premium .feature-item::before {
+            color: white;
+        }
+
+        /* 特徴セクション */
+        .features {
+            background: #0f0f23;
+            padding: 5rem 1.5rem;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .features::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: 
+                radial-gradient(circle at 20% 50%, rgba(102, 126, 234, 0.1) 0%, transparent 50%),
+                radial-gradient(circle at 80% 80%, rgba(118, 75, 162, 0.1) 0%, transparent 50%);
+        }
+
+        .features .section-title {
+            color: white;
+            position: relative;
+            z-index: 1;
+        }
+
+        .features .section-subtitle {
+            color: rgba(255,255,255,0.7);
+            position: relative;
+            z-index: 1;
+        }
+
+        .feature-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+            gap: 2.5rem;
+            max-width: 1200px;
+            margin: 0 auto;
+            position: relative;
+            z-index: 1;
+        }
+
+        .feature-box {
+            background: rgba(255,255,255,0.05);
+            border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 20px;
+            padding: 3rem 2rem;
+            text-align: center;
+            transition: all 0.4s ease;
+            backdrop-filter: blur(10px);
+            opacity: 0;
+            animation: fadeInUp 0.8s ease-out forwards;
+        }
+
+        .feature-box:nth-child(1) {
+            animation-delay: 0.2s;
+        }
+
+        .feature-box:nth-child(2) {
+            animation-delay: 0.4s;
+        }
+
+        .feature-box:nth-child(3) {
+            animation-delay: 0.6s;
+        }
+
+        .feature-box:hover {
+            transform: translateY(-10px);
+            background: rgba(255,255,255,0.08);
+            border-color: rgba(102, 126, 234, 0.5);
+            box-shadow: 0 20px 60px rgba(102, 126, 234, 0.3);
+        }
+
+        .feature-icon {
+            font-size: 4rem;
+            margin-bottom: 1.5rem;
+            display: inline-block;
+            animation: float 3s ease-in-out infinite;
+        }
+
+        .feature-box:nth-child(2) .feature-icon {
+            animation-delay: 1s;
+        }
+
+        .feature-box:nth-child(3) .feature-icon {
+            animation-delay: 2s;
+        }
+
+        .feature-box h3 {
+            font-size: 1.6rem;
+            color: white;
+            margin-bottom: 1rem;
+            font-weight: 700;
+        }
+
+        .feature-box p {
+            color: rgba(255,255,255,0.8);
+            line-height: 1.8;
+            font-size: 1.05rem;
+        }
+
+        .feature-highlight {
+            display: inline-block;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 0.3rem 0.8rem;
+            border-radius: 20px;
+            font-weight: 600;
+            margin-top: 1rem;
+            font-size: 0.9rem;
+        }
+
+        /* 使い方セクション */
+        .how-to {
+            background: #f8f9fa;
+            padding: 5rem 1.5rem;
+        }
+
+        .steps {
+            max-width: 900px;
+            margin: 0 auto;
+            display: grid;
+            gap: 3rem;
+        }
+
+        .step {
+            display: grid;
+            grid-template-columns: 80px 1fr;
+            gap: 2rem;
+            align-items: start;
+            opacity: 0;
+            animation: fadeInUp 0.6s ease-out forwards;
+        }
+
+        .step:nth-child(1) {
+            animation-delay: 0.1s;
+        }
+
+        .step:nth-child(2) {
+            animation-delay: 0.3s;
+        }
+
+        .step:nth-child(3) {
+            animation-delay: 0.5s;
+        }
+
+        .step-number {
+            width: 80px;
+            height: 80px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 2rem;
+            font-weight: 700;
+            flex-shrink: 0;
+            transition: all 0.3s ease;
+        }
+
+        .step:hover .step-number {
+            transform: scale(1.1) rotate(5deg);
+            box-shadow: 0 10px 30px rgba(102, 126, 234, 0.4);
+        }
+
+        .step-content h3 {
+            font-size: 1.3rem;
+            color: #2c3e50;
+            margin-bottom: 0.8rem;
+            font-weight: 600;
+        }
+
+        .step-content p {
+            color: #5a6c7d;
+            line-height: 1.8;
+        }
+
+        /* CTAセクション */
+        .cta-section {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            text-align: center;
+            padding: 5rem 1.5rem;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .cta-section::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: radial-gradient(circle at 70% 30%, rgba(255,255,255,0.1) 0%, transparent 50%);
+            animation: float 8s ease-in-out infinite;
+        }
+
+        .cta-section h2 {
+            font-size: clamp(2rem, 5vw, 2.8rem);
+            margin-bottom: 1.5rem;
+            font-weight: 700;
+            position: relative;
+            z-index: 1;
+        }
+
+        .cta-section p {
+            font-size: clamp(1rem, 2vw, 1.3rem);
+            margin-bottom: 2.5rem;
+            opacity: 0.95;
+            position: relative;
+            z-index: 1;
+        }
+
+        .cta-button.inverted {
+            background: white;
+            color: #667eea;
+            position: relative;
+            z-index: 1;
+        }
+
+        /* フッター */
+        footer {
+            background: #2c3e50;
+            color: #ecf0f1;
+            padding: 3rem 1.5rem 1.5rem;
+        }
+
+        .footer-content {
+            max-width: 1200px;
+            margin: 0 auto;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 2rem;
+            margin-bottom: 2rem;
+        }
+
+        .footer-section h4 {
+            color: white;
+            margin-bottom: 1rem;
+            font-size: 1rem;
+            font-weight: 600;
+        }
+
+        .footer-section a {
+            display: block;
+            color: #bdc3c7;
+            text-decoration: none;
+            margin-bottom: 0.5rem;
+            font-size: 0.85rem;
+            transition: color 0.2s;
+            cursor: pointer;
+        }
+
+        .footer-section a:hover {
+            color: #667eea;
+        }
+
+        .footer-bottom {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding-top: 1.5rem;
+            border-top: 1px solid #34495e;
+            text-align: center;
+            color: #95a5a6;
+            font-size: 0.8rem;
+        }
+
+        /* モーダル */
+        .modal {
+            display: none;
+            position: fixed;
+            z-index: 2000;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.7);
+            padding: 1rem;
+            overflow-y: auto;
+        }
+
+        .modal-content {
+            background: white;
+            margin: 2rem auto;
+            padding: 2.5rem 2rem;
+            border-radius: 16px;
+            max-width: 500px;
+            text-align: center;
+            position: relative;
+            animation: fadeInUp 0.4s ease-out;
+        }
+
+        .close {
+            position: absolute;
+            right: 1.5rem;
+            top: 1.5rem;
+            font-size: 2rem;
+            color: #5a6c7d;
+            cursor: pointer;
+            transition: color 0.2s;
+            line-height: 1;
+        }
+
+        .close:hover {
+            color: #667eea;
+        }
+
+        .modal-content h3 {
+            color: #2c3e50;
+            margin-bottom: 1.5rem;
+            font-size: 1.8rem;
+        }
+
+        .qr-code-container {
+            background: #f8f9fa;
+            padding: 2rem;
+            border-radius: 12px;
+            margin: 2rem 0;
+        }
+
+        #qrcode {
+            display: flex;
+            justify-content: center;
+            margin-bottom: 1rem;
+        }
+
+        #qrcode img {
+            max-width: 100%;
+            height: auto;
+        }
+
+        .line-add-button {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            background: #06C755;
+            color: white;
+            padding: 1.2rem 2rem;
+            border-radius: 50px;
+            text-decoration: none;
+            font-weight: 600;
+            margin-top: 1rem;
+            transition: all 0.3s ease;
+            width: 100%;
+            max-width: 350px;
+        }
+
+        .line-add-button:hover {
+            background: #05b34a;
+            transform: translateY(-2px);
+            box-shadow: 0 8px 20px rgba(6,199,85,0.3);
+        }
+
+        .line-icon {
+            width: 24px;
+            height: 24px;
+            margin-right: 0.5rem;
+        }
+
+        /* レスポンシブ */
+        @media (max-width: 768px) {
+            nav {
+                display: none;
+            }
+
+            .step {
+                grid-template-columns: 60px 1fr;
+                gap: 1.5rem;
+            }
+
+            .step-number {
+                width: 60px;
+                height: 60px;
+                font-size: 1.5rem;
+            }
+
+            .plans-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .feature-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .hidden {
+            display: none !important;
+        }
+        /* 特定商取引法セクションのスタイル（テーブル用を削除） */
+        .sct-info {
+            padding: 5rem 1.5rem;
+            background: #f1f3f5;
+        }
+        .sct-content {
+            max-width: 800px;
+            margin: 0 auto;
+        }
+        .sct-note {
+            font-size: 0.85rem;
+            color: #868e96;
+            text-align: center;
+        }
+        
+        /* ↓↓↓ ここから新しいCSSを追加 ↓↓↓ */
+
+        /* 特定商取引法ページ（リスト形式）のスタイル */
+        .sct-list {
+            border: 1px solid #dee2e6;
+            border-radius: 8px;
+            overflow: hidden;
+            background: white;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.05);
+        }
+        .sct-list dt, .sct-list dd {
+            padding: 1.25rem 1.5rem;
+        }
+        .sct-list dt {
+            background-color: #f8f9fa;
+            font-weight: 600;
+            color: #495057;
+            border-bottom: 1px solid #dee2e6;
+            font-size: 0.95rem;
+        }
+        .sct-list dd {
+            margin-left: 0; /* dlのデフォルトマージンをリセット */
+            color: #2c3e50;
+            border-bottom: 1px solid #e9ecef;
+            line-height: 1.8;
+        }
+        /* 最後の項目は下の罫線を消す */
+        .sct-list dt:last-of-type,
+        .sct-list dd:last-of-type {
+            border-bottom: none;
+        }
+        .sct-list dd a {
+            color: #667eea;
+            text-decoration: none;
+        }
+        .sct-list dd a:hover {
+            text-decoration: underline;
+        }
+
+        /* 画面が広い場合（PCなど）は、テーブルのように見せる */
+        @media (min-width: 768px) {
+            .sct-list {
+                display: grid;
+                grid-template-columns: 30% 1fr; /* 項目名と内容で列を分ける */
+            }
+            .sct-list dt {
+                border-bottom: 1px solid #e9ecef; /* 縦線と合わせる */
+                border-right: 1px solid #dee2e6;
+            }
+            /* 最後の行のdt, ddの罫線を消す */
+            .sct-list dt:last-of-type {
+                 border-bottom: none;
+            }
+        }
+        /* ↑↑↑ ここまで新しいCSSを追加 ↑↑↑ */
+    </style>
+</head>
+<body>
+    <div id="mainPage">
+        <!-- ヘッダー -->
+        <header>
+            <div class="header-content">
+                <div class="logo">VisAI</div>
+                <nav>
+                    <a href="#plans">プラン</a>
+                    <a href="#features">特徴</a>
+                    <a href="#how-to">使い方</a>
+                </nav>
+            </div>
+        </header>
+
+        <!-- ヒーローセクション -->
+        <section class="hero">
+            <div class="hero-content">
+                <div class="badge">🎁 最初の3日間無料トライアル</div>
+                <h1>あなた専用のニュース配信</h1>
+                <p>AIがあなたの興味に合わせて最新ニュースを厳選。LINEで毎日届く、パーソナライズされた情報体験。</p>
+                <button class="cta-button" onclick="openModal()">
+                    無料で始める
+                </button>
+            </div>
+        </section>
+
+        <!-- プラン比較 -->
+        <section id="plans" class="plans">
+            <h2 class="section-title">選べる2つのプラン</h2>
+            <p class="section-subtitle">あなたのライフスタイルに合わせて選択できます</p>
+            <div class="plans-grid">
+                <!-- 無料プラン -->
+                <div class="plan-card">
+                    <div class="plan-name">無料プラン</div>
+                    <div class="plan-price">¥0</div>
+                    <div class="plan-duration">永久無料</div>
+                    <ul class="feature-list">
+                        <li class="feature-item">毎朝8時に自動配信</li>
+                        <li class="feature-item">重要ニュースを厳選</li>
+                        <li class="feature-item">複数の情報源から取得</li>
+                        <li class="feature-item">配信停止・再開が自由</li>
+                    </ul>
+                </div>
+                <!-- プレミアムプラン -->
+                <div class="plan-card premium">
+                    <div class="popular-badge">🌟 おすすめ</div>
+                    <div class="plan-name">プレミアムプラン</div>
+                    <div class="plan-price">¥300<span style="font-size:1rem">/月</span></div>
+                    <div class="plan-duration">3日間無料トライアル</div>
+                    <ul class="feature-list">
+                        <li class="feature-item">すべての無料機能</li>
+                        <li class="feature-item">パーソナライズ配信</li>
+                        <li class="feature-item">配信時間を自由に設定</li>
+                        <li class="feature-item">AIに質問して深掘り</li>
+                        <li class="feature-item">年齢・職業に最適化</li>
+                        <li class="feature-item">興味分野を選択可能</li>
+                    </ul>
+                </div>
+            </div>
+        </section>
+
+        <!-- 特徴セクション -->
+        <section id="features" class="features">
+            <h2 class="section-title">VisAIの特徴</h2>
+            <p class="section-subtitle">最先端のAI技術で実現する、革新的な情報体験</p>
+            <div class="feature-grid">
+                <div class="feature-box">
+                    <div class="feature-icon">🚀</div>
+                    <h3>次世代AI要約</h3>
+                    <p>OpenAI GPT-4が膨大な情報を瞬時に分析。世界中のニュースから、あなたに本当に必要な情報だけを抽出します。</p>
+                    <div class="feature-highlight">精度99%以上</div>
+                </div>
+                <div class="feature-box">
+                    <div class="feature-icon">✨</div>
+                    <h3>完全パーソナライズ</h3>
+                    <p>年齢、職業、興味分野を学習し、毎日進化。あなただけのニュースフィードを自動生成します。</p>
+                    <div class="feature-highlight">AI学習機能</div>
+                </div>
+                <div class="feature-box">
+                    <div class="feature-icon">💡</div>
+                    <h3>インテリジェント対話</h3>
+                    <p>配信されたニュースについて自由に質問。AIがリアルタイムで深い洞察を提供し、理解をサポートします。</p>
+                    <div class="feature-highlight">24時間対応</div>
+                </div>
+            </div>
+        </section>
+
+        <!-- 使い方セクション -->
+        <section id="how-to" class="how-to">
+            <h2 class="section-title">始め方</h2>
+            <p class="section-subtitle">3ステップで簡単スタート</p>
+            <div class="steps">
+                <div class="step">
+                    <div class="step-number">1</div>
+                    <div class="step-content">
+                        <h3>友だち追加</h3>
+                        <p>LINE公式アカウントを友だち追加。登録は30秒で完了します。</p>
+                    </div>
+                </div>
+                <div class="step">
+                    <div class="step-number">2</div>
+                    <div class="step-content">
+                        <h3>プラン選択</h3>
+                        <p>無料プランですぐに開始、またはプレミアムで3日間無料トライアル。</p>
+                    </div>
+                </div>
+                <div class="step">
+                    <div class="step-number">3</div>
+                    <div class="step-content">
+                        <h3>ニュース受け取り</h3>
+                        <p>翌朝から自動配信スタート。「今すぐ」と送信すればいつでも最新ニュースを受け取れます。</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- CTAセクション -->
+        <section class="cta-section">
+            <h2>今すぐ始めましょう</h2>
+            <p>パーソナライズされたニュースを無料で体験</p>
+            <button class="cta-button inverted" onclick="openModal()">
+                LINE友だち追加
+            </button>
+        </section>
+        <!-- フッター -->
+        <footer>
+            <div class="footer-content">
+                <div class="footer-section">
+                    <h4>サービス</h4>
+                    <a href="#plans">プラン</a>
+                    <a href="#features">特徴</a>
+                    <a href="#how-to">使い方</a>
+                </div>
+                <div class="footer-section">
+                    <h4>リソース</h4>
+                    <a onclick="showPrivacyPolicy()">プライバシーポリシー</a>
+                    <a onclick="showTerms()">利用規約</a>
+                    <a onclick="showFAQ()">FAQ</a>
+                    <a onclick="showSCT()">特定商取引法に基づく表記</a>
+                </div>
+                <div class="footer-section">
+                    <h4>お問い合わせ</h4>
+                    <a href="mailto:xinanteng065@gmail.com">サポート</a>
+                </div>
+            </div>
+            <div class="footer-bottom">
+                <p>&copy; 2025 VisAI. All rights reserved.</p>
+                <p style="margin-top: 0.5rem;">Powered by OpenAI API × LINE Messaging API × Stripe</p>
+            </div>
+        </footer>
+    </div>
+
+    <!-- プライバシーポリシーページ -->
+    <div id="privacyPage" class="hidden">
+        <header>
+            <div class="header-content">
+                <div class="logo">VisAI</div>
+            </div>
+        </header>
+        <section style="padding: 4rem 1.5rem; background: #f8f9fa;">
+            <div style="max-width: 800px; margin: 0 auto; background: white; padding: 2.5rem; border-radius: 16px; box-shadow: 0 2px 8px rgba(0,0,0,0.05);">
+                <a style="display: inline-block; margin-bottom: 2rem; color: #667eea; text-decoration: none; font-weight: 600; cursor: pointer;" onclick="showMainPage()">← トップに戻る</a>
+                <h1 style="font-size: 2rem; color: #2c3e50; margin-bottom: 2rem;">プライバシーポリシー</h1>
+                
+                <p style="color: #5a6c7d; margin-bottom: 1.5rem; line-height: 1.8;">VisAI（以下「当サービス」）は、ユーザーの個人情報の取り扱いについて、以下のとおりプライバシーポリシーを定めます。</p>
+
+                <h2 style="color: #667eea; margin-top: 2rem; margin-bottom: 1rem; font-size: 1.5rem;">1. 収集する情報</h2>
+                <p style="color: #5a6c7d; margin-bottom: 1rem; line-height: 1.8;">当サービスは、以下の情報を収集します：</p>
+                <ul style="color: #5a6c7d; margin-bottom: 1.5rem; padding-left: 2rem; line-height: 1.8;">
+                    <li>LINE ユーザーID</li>
+                    <li>表示名（ニックネーム）</li>
+                    <li>プレミアムプランユーザーの設定情報（年齢、職業、興味分野、配信時間）</li>
+                    <li>サービス利用履歴（配信設定、コマンド使用履歴）</li>
+                    <li>決済情報（Stripe経由、カード情報は保存されません）</li>
+                </ul>
+
+                <h2 style="color: #667eea; margin-top: 2rem; margin-bottom: 1rem; font-size: 1.5rem;">2. 情報の利用目的</h2>
+                <p style="color: #5a6c7d; margin-bottom: 1rem; line-height: 1.8;">収集した情報は、以下の目的で利用します：</p>
+                <ul style="color: #5a6c7d; margin-bottom: 1.5rem; padding-left: 2rem; line-height: 1.8;">
+                    <li>ニュース配信サービスの提供</li>
+                    <li>パーソナライズされたコンテンツの生成</li>
+                    <li>サービスの改善と最適化</li>
+                    <li>ユーザーサポート</li>
+                    <li>決済処理および請求管理</li>
+                </ul>
+
+                <h2 style="color: #667eea; margin-top: 2rem; margin-bottom: 1rem; font-size: 1.5rem;">3. 外部サービスの利用</h2>
+                <p style="color: #5a6c7d; margin-bottom: 1rem; line-height: 1.8;">当サービスは、以下の外部サービスを利用しています：</p>
+                <ul style="color: #5a6c7d; margin-bottom: 1.5rem; padding-left: 2rem; line-height: 1.8;">
+                    <li>LINE Messaging API（メッセージ配信）</li>
+                    <li>OpenAI API（コンテンツ要約・AI対話）</li>
+                    <li>Stripe（決済処理）</li>
+                    <li>各種ニュースAPI（NewsAPI, The Guardian, BBC等）</li>
+                </ul>
+
+                <h2 style="color: #667eea; margin-top: 2rem; margin-bottom: 1rem; font-size: 1.5rem;">4. 決済情報について</h2>
+                <p style="color: #5a6c7d; margin-bottom: 1.5rem; line-height: 1.8;">クレジットカード情報は当サービスで保存されず、Stripeにて安全に管理されます。当サービスは最小限の決済関連情報（サブスクリプションID等）のみを保持します。</p>
+
+                <h2 style="color: #667eea; margin-top: 2rem; margin-bottom: 1rem; font-size: 1.5rem;">5. 情報の保管と削除</h2>
+                <p style="color: #5a6c7d; margin-bottom: 1.5rem; line-height: 1.8;">ユーザー情報は、サービス提供に必要な期間保管されます。解約後、一定期間経過後に自動的に削除されます。即時削除をご希望の場合は、サポートまでご連絡ください。</p>
+
+                <h2 style="color: #667eea; margin-top: 2rem; margin-bottom: 1rem; font-size: 1.5rem;">6. お問い合わせ</h2>
+                <p style="color: #5a6c7d; margin-bottom: 1rem; line-height: 1.8;">本ポリシーに関するお問い合わせは、以下までご連絡ください：</p>
+                <p style="color: #5a6c7d; margin-bottom: 1.5rem;"><a href="mailto:xinanteng065@gmail.com" style="color: #667eea;">xinanteng065@gmail.com</a></p>
+
+                <p style="margin-top: 3rem; font-size: 0.9rem; color: #95a5a6;">最終更新日: 2025年1月1日</p>
+            </div>
+        </section>
+    </div>
+
+    <!-- 利用規約ページ -->
+    <div id="termsPage" class="hidden">
+        <header>
+            <div class="header-content">
+                <div class="logo">VisAI</div>
+            </div>
+        </header>
+        <section style="padding: 4rem 1.5rem; background: #f8f9fa;">
+            <div style="max-width: 800px; margin: 0 auto; background: white; padding: 2.5rem; border-radius: 16px; box-shadow: 0 2px 8px rgba(0,0,0,0.05);">
+                <a style="display: inline-block; margin-bottom: 2rem; color: #667eea; text-decoration: none; font-weight: 600; cursor: pointer;" onclick="showMainPage()">← トップに戻る</a>
+                <h1 style="font-size: 2rem; color: #2c3e50; margin-bottom: 2rem;">利用規約</h1>
+                
+                <h2 style="color: #667eea; margin-top: 2rem; margin-bottom: 1rem; font-size: 1.5rem;">第1条（サービス内容）</h2>
+                <p style="color: #5a6c7d; margin-bottom: 1.5rem; line-height: 1.8;">VisAIは、LINEを通じて最新ニュース情報を配信するサービスです。無料プランとプレミアムプランの2種類を提供します。</p>
+
+                <h2 style="color: #667eea; margin-top: 2rem; margin-bottom: 1rem; font-size: 1.5rem;">第2条（利用料金）</h2>
+                <ul style="color: #5a6c7d; margin-bottom: 1.5rem; padding-left: 2rem; line-height: 1.8;">
+                    <li>無料プラン：永久無料</li>
+                    <li>プレミアムプラン：月額300円（税込）、初回3日間無料</li>
+                    <li>通信料金はユーザーの負担となります</li>
+                </ul>
+
+                <h2 style="color: #667eea; margin-top: 2rem; margin-bottom: 1rem; font-size: 1.5rem;">第3条（解約・返金）</h2>
+                <p style="color: #5a6c7d; margin-bottom: 1.5rem; line-height: 1.8;">プレミアムプランはいつでも解約可能です。解約後は無料プランに自動移行します。日割り返金は行っておりません。</p>
+
+                <h2 style="color: #667eea; margin-top: 2rem; margin-bottom: 1rem; font-size: 1.5rem;">第4条（禁止事項）</h2>
+                <ul style="color: #5a6c7d; margin-bottom: 1.5rem; padding-left: 2rem; line-height: 1.8;">
+                    <li>配信された情報の無断転載や商用利用</li>
+                    <li>不正な決済や複数アカウントでの無料トライアル悪用</li>
+                    <li>サービスの運営を妨害する行為</li>
+                </ul>
+
+                <p style="margin-top: 3rem; font-size: 0.9rem; color: #95a5a6;">最終更新日: 2025年1月1日</p>
+            </div>
+        </section>
+    </div>
+
+    <!-- FAQページ -->
+    <div id="faqPage" class="hidden">
+        <header>
+            <div class="header-content">
+                <div class="logo">VisAI</div>
+            </div>
+        </header>
+        <section style="padding: 4rem 1.5rem; background: #f8f9fa;">
+            <div style="max-width: 800px; margin: 0 auto; background: white; padding: 2.5rem; border-radius: 16px; box-shadow: 0 2px 8px rgba(0,0,0,0.05);">
+                <a style="display: inline-block; margin-bottom: 2rem; color: #667eea; text-decoration: none; font-weight: 600; cursor: pointer;" onclick="showMainPage()">← トップに戻る</a>
+                <h1 style="font-size: 2rem; color: #2c3e50; margin-bottom: 2rem;">よくある質問</h1>
+                
+                <h2 style="color: #667eea; margin-top: 2rem; margin-bottom: 1rem; font-size: 1.3rem;">Q1. プレミアムプランの決済方法は？</h2>
+                <p style="color: #5a6c7d; margin-bottom: 2rem; line-height: 1.8;">Stripeを通じてクレジットカード決済が可能です。安全性の高い決済システムを採用しています。</p>
+
+                <h2 style="color: #667eea; margin-top: 2rem; margin-bottom: 1rem; font-size: 1.3rem;">Q2. トライアル期間中に解約できますか？</h2>
+                <p style="color: #5a6c7d; margin-bottom: 2rem; line-height: 1.8;">はい、3日間のトライアル期間中いつでも解約できます。「解約」と送信し、解約ページで手続きを完了すれば料金は発生しません。</p>
+
+                <h2 style="color: #667eea; margin-top: 2rem; margin-bottom: 1rem; font-size: 1.3rem;">Q3. AIに質問できる機能の使い方は？</h2>
+                <p style="color: #5a6c7d; margin-bottom: 2rem; line-height: 1.8;">プレミアムプランで配信されたニュースについて、LINEで自由に質問できます。「この件について詳しく教えて」など、自然な文章で聞いてください。</p>
+
+                <h2 style="color: #667eea; margin-top: 2rem; margin-bottom: 1rem; font-size: 1.3rem;">Q4. 配信時間は変更できますか？</h2>
+                <p style="color: #5a6c7d; margin-bottom: 2rem; line-height: 1.8;">プレミアムプランでは配信時間を自由に設定できます。「設定変更」と送信し、設定ページからカテゴリーや配達時間を簡単に変更できます。</p>
+
+                <h2 style="color: #667eea; margin-top: 2rem; margin-bottom: 1rem; font-size: 1.3rem;">Q5. データは安全ですか？</h2>
+                <p style="color: #5a6c7d; margin-bottom: 2rem; line-height: 1.8;">はい。決済情報はStripeで暗号化され、当サービスではカード情報を一切保存しません。個人情報も厳重に管理されています。</p>
+            </div>
+        </section>
+    </div>
+
+    <!-- QRコードモーダル -->
+    <div id="lineModal" class="modal">
+        <div class="modal-content">
+            <span class="close" onclick="closeModal()">&times;</span>
+            <h3>LINE友だち追加</h3>
+            <p style="color: #5a6c7d; margin-bottom: 1rem; font-size: 0.95rem;">
+                QRコードを読み取るか、下のボタンから追加してください
+            </p>
+            <div class="qr-code-container">
+                <div id="qrcode"></div>
+                <p style="font-size: 0.85rem; color: #5a6c7d; margin-top: 1rem;">
+                    スマートフォンのカメラで読み取り
+                </p>
+            </div>
+            <a href="https://line.me/R/ti/p/@298qcfgk" id="lineAddLink" class="line-add-button" target="_blank">
+                <svg class="line-icon" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M19.365 9.863c.349 0 .63.285.63.631 0 .345-.281.63-.63.63H17.61v1.125h1.755c.349 0 .63.283.63.63 0 .344-.281.629-.63.629h-2.386c-.345 0-.627-.285-.627-.629V8.108c0-.345.282-.63.63-.63h2.386c.346 0 .627.285.627.63 0 .349-.281.63-.63.63H17.61v1.125h1.755zm-3.855 3.016c0 .27-.174.51-.432.596-.064.021-.133.031-.199.031-.211 0-.391-.09-.51-.25l-2.443-3.317v2.94c0 .344-.279.629-.631.629-.346 0-.626-.285-.626-.629V8.108c0-.27.173-.51.43-.595.06-.023.136-.033.194-.033.195 0 .375.104.495.254l2.462 3.33V8.108c0-.345.282-.63.63-.63.345 0 .63.285.63.63v4.771zm-5.741 0c0 .344-.282.629-.631.629-.345 0-.627-.285-.627-.629V8.108c0-.345.282-.63.63-.63.346 0 .628.285.628.63v4.771zm-2.466.629H4.917c-.345 0-.63-.285-.63-.629V8.108c0-.345.285-.63.63-.63.348 0 .63.285.63.63v4.141h1.756c.348 0 .629.283.629.63 0 .344-.282.629-.629.629M24 10.314C24 4.943 18.615.572 12 .572S0 4.943 0 10.314c0 4.811 4.27 8.842 10.035 9.608.391.082.923.258 1.058.59.12.301.079.766.038 1.08l-.164 1.02c-.045.301-.24 1.186 1.049.645 1.291-.539 6.916-4.078 9.436-6.975C23.176 14.393 24 12.458 24 10.314"></path>
+                </svg>
+                LINEで友だち追加
+            </a>
+        </div>
+    </div>
+<div id="sctPage" class="hidden">
+        <header>
+            <div class="header-content">
+                <div class="logo">VisAI</div>
+            </div>
+        </header>
+        <section style="padding: 4rem 1.5rem; background: #f8f9fa;">
+            <div style="max-width: 800px; margin: 0 auto; background: white; padding: 2.5rem; border-radius: 16px; box-shadow: 0 2px 8px rgba(0,0,0,0.05);">
+                <a style="display: inline-block; margin-bottom: 2rem; color: #667eea; text-decoration: none; font-weight: 600; cursor: pointer;" onclick="showMainPage()">← トップに戻る</a>
+                <h1 style="font-size: 2rem; color: #2c3e50; margin-bottom: 2rem;">特定商取引法に基づく表記</h1>
+                <p style="color: #5a6c7d; margin-bottom: 2.5rem; line-height: 1.8;">
+                    当サービスは、特定商取引法に基づき、以下のとおり販売条件を明示します。
+                </p>
+
+                <dl class="sct-list">
+                    <dt>事業者名</dt>
+                    <dd>VisAI運営事務局（個人事業主）</dd>
+
+                    <dt>運営責任者</dt>
+                    <dd>**請求があり次第、遅滞なく開示します**</dd>
+
+                    <dt>所在地</dt>
+                    <dd>**請求があり次第、遅滞なく開示します**</dd>
+
+                    <dt>お問い合わせ先</dt>
+                    <dd>メールアドレス: <a href="mailto:xinanteng065@gmail.com">xinanteng065@gmail.com</a><br>電話番号: **請求があり次第、遅滞なく開示します**</dd>
+
+                    <dt>販売価格</dt>
+                    <dd>プレミアムプラン：月額300円（税込）</dd>
+
+                    <dt>商品代金以外の必要料金</dt>
+                    <dd>消費税、インターネット接続料金、パケット通信料</dd>
+
+                    <dt>支払い方法</dt>
+                    <dd>クレジットカード（Stripe経由）</dd>
+
+                    <dt>支払い時期</dt>
+                    <dd>初回登録時および thereafter 毎月自動課金</dd>
+
+                    <dt>サービスの提供時期</dt>
+                    <dd>決済手続き完了後、直ちに利用可能となります。</dd>
+
+                    <dt>返品・交換・キャンセル</dt>
+                    <dd>デジタルコンテンツの性質上、購入確定後の**お客様都合による返品、返金、交換には応じられません**。<br>（**月額契約のため、日割り返金は行いません**）</dd>
+
+                    <dt>解約・退会条件</dt>
+                    <dd>サービス内所定の手続きにより、**いつでも解約可能**です。解約後も次の請求日までサービスを利用できます。</dd>
+
+                    <dt>動作環境</dt>
+                    <dd>LINEアプリが動作するスマートフォン、またはPC。インターネット接続が必要。</dd>
+                </dl>
+                <p style="color: #a0a0a0; font-size: 0.9rem; margin-top: 3rem;">
+                    ※ 上記の「請求があり次第、遅滞なく開示します」という表記は、特定商取引法に基づき、お客様から開示の請求があった場合、メール等の手段で個別にご自身の情報をお知らせすることを意味します。
+                </p>
+                <p style="margin-top: 1rem; font-size: 0.9rem; color: #95a0a6;">最終更新日: 2025年10月29日</p>
+            </div>
+        </section>
+    </div>
+
+    <!-- QRコード生成ライブラリ -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+
+    <script>
+        const LINE_BOT_ID = '@298qcfgk';
+        const LINE_ADD_URL = `https://line.me/R/ti/p/${LINE_BOT_ID}`;
+        let qrGenerated = false;
+
+        function closeModal() {
+            document.getElementById('lineModal').style.display = 'none';
+        }
+
+        function showPage(pageId) {
+            const pages = ['mainPage', 'privacyPage', 'termsPage', 'sctPage', 'faqPage'];
+            pages.forEach(id => {
+                document.getElementById(id).classList.add('hidden');
+            });
+            document.getElementById(pageId).classList.remove('hidden');
+            window.scrollTo(0, 0); // ページトップへ移動
+        }
+
+        function showMainPage() {
+            showPage('mainPage');
+        }
+
+        function showPrivacyPolicy() {
+            showPage('privacyPage');
+        }
+
+        function showTerms() {
+            showPage('termsPage');
+        }
+
+        function showFAQ() {
+            showPage('faqPage');
+        }
+
+        // 特定商取引法に基づく表記を表示する関数 (新規追加)
+        function showSCT() {
+            showPage('sctPage');
+        }
+
+        function openModal() {
+            const modal = document.getElementById('lineModal');
+            modal.style.display = 'block';
+            document.body.style.overflow = 'hidden';
+            
+            if (!qrGenerated) {
+                const qrcodeDiv = document.getElementById('qrcode');
+                qrcodeDiv.innerHTML = '';
+                
+                try {
+                    new QRCode(qrcodeDiv, {
+                        text: LINE_ADD_URL,
+                        width: 200,
+                        height: 200,
+                        colorDark: '#000000',
+                        colorLight: '#ffffff',
+                        correctLevel: QRCode.CorrectLevel.H
+                    });
+                    qrGenerated = true;
+                } catch (error) {
+                    console.error('QRコード生成エラー:', error);
+                    qrcodeDiv.innerHTML = '<p style="color: #e74c3c;">QRコード生成に失敗しました</p>';
+                }
+            }
+            
+            document.getElementById('lineAddLink').href = LINE_ADD_URL;
+        }
+
+        function closeModal() {
+            document.getElementById('lineModal').style.display = 'none';
+            document.body.style.overflow = 'auto';
+        }
+
+        window.onclick = function(event) {
+            const modal = document.getElementById('lineModal');
+            if (event.target === modal) {
+                closeModal();
+            }
+        }
+
+        document.addEventListener('keydown', function(event) {
+            if (event.key === 'Escape') {
+                closeModal();
+            }
+        });
+
+        // スムーススクロール
+        document.addEventListener('DOMContentLoaded', function() {
+            document.querySelectorAll('a[href^="#"]').forEach(anchor => {
+                anchor.addEventListener('click', function (e) {
+                    const href = this.getAttribute('href');
+                    if (href !== '#') {
+                        e.preventDefault();
+                        const target = document.querySelector(href);
+                        if (target) {
+                            target.scrollIntoView({
+                                behavior: 'smooth',
+                                block: 'start'
+                            });
+                        }
+                    }
+                });
+            });
+        });
+    </script>
+</body>
+</html>
