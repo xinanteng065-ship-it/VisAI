@@ -1,4 +1,4 @@
-from flask import Flask, request, abort, render_template_string, redirect
+from flask import Flask, request, abort, render_template_string
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage
@@ -6,23 +6,21 @@ import feedparser
 import openai
 import threading
 import re
-import os
 from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime
-import json
 
 app = Flask(__name__)
 
-# 環境変数から取得（Renderでは環境変数に設定）
-LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "bK+iKhs41Ng48iSxREkWy/bzt+oICA31xL7CtYE0P407xIXtbmZ/TGieQ695Rqr7wsBWkqak0lfalonJXgvkZKbVTzjF3+wcRT9uKADAEaCdaPiLwGUvjKQ0Hht15fEDcP/Slmg96++xNas+tMDZNQdB04t89/1O/w1cDnyilFU=")
-LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET", "5bb44277689780213c3c32bc57720b50")
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "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")
+# ここに自分のキーをそのまま書く
+LINE_CHANNEL_ACCESS_TOKEN = "bK+iKhs41Ng48iSxREkWy/bzt+oICA31xL7CtYE0P407xIXtbmZ/TGieQ695Rqr7wsBWkqak0lfalonJXgvkZKbVTzjF3+wcRT9uKADAEaCdaPiLwGUvjKQ0Hht15fEDcP/Slmg96++xNas+tMDZNQdB04t89/1O/w1cDnyilFU="
+LINE_CHANNEL_SECRET = "5bb44277689780213c3c32bc57720b50"
+OPENAI_API_KEY = "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"
 
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 web_hook_handler = WebhookHandler(LINE_CHANNEL_SECRET)
 client = openai.OpenAI(api_key=OPENAI_API_KEY)
 
-# ユーザー設定を保存（本番環境ではデータベース推奨）
+# ユーザー設定を保存
 user_settings = {}
 
 # RSS URL
@@ -38,7 +36,7 @@ RSS_URL = {
 }
 
 # スケジューラー初期化
-scheduler = BackgroundScheduler()
+scheduler = BackgroundScheduler(timezone="Asia/Tokyo")
 scheduler.start()
 
 
@@ -393,7 +391,7 @@ def handle_message(event):
 
 
 # ------------------------------------------------------
-# ヘルスチェック（Render用）
+# ヘルスチェック
 # ------------------------------------------------------
 @app.route("/")
 def health_check():
@@ -401,5 +399,4 @@ def health_check():
 
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(debug=True)
