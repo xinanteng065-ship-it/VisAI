@@ -20,7 +20,7 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "sk-proj-5sgwpL0j0qEHb1lRLB0cj
 
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 web_hook_handler = WebhookHandler(LINE_CHANNEL_SECRET)
-openai.api_key = OPENAI_API_KEY
+client = openai.OpenAI(api_key=OPENAI_API_KEY)
 
 # ユーザー設定を保存（本番環境ではデータベース推奨）
 user_settings = {}
@@ -94,8 +94,8 @@ def summarize_articles(articles, category):
         )
 
     try:
-        response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
             max_tokens=800,
             temperature=0.3
