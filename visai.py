@@ -14,9 +14,9 @@ import json
 app = Flask(__name__)
 
 # 環境変数から取得（Renderでは環境変数に設定）
-LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "bK+iKhs41Ng48iSxREkWy/bzt+oICA31xL7CtYE0P407xIXtbmZ/TGieQ695Rqr7wsBWkqak0lfalonJXgvkZKbVTzjF3+wcRT9uKADAEaCdaPiLwGUvjKQ0Hht15fEDcP/Slmg96++xNas+tMDZNQdB04t89/1O/w1cDnyilFU=")
-LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET", "5bb44277689780213c3c32bc57720b50")
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "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")
+LINE_CHANNEL_ACCESS_TOKEN = os.environ["LINE_CHANNEL_ACCESS_TOKEN"]
+LINE_CHANNEL_SECRET = os.environ["LINE_CHANNEL_SECRET"]
+OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
 
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 web_hook_handler = WebhookHandler(LINE_CHANNEL_SECRET)
