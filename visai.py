@@ -24,7 +24,7 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 
 # アプリの公開URL（RenderのURLが確定したら修正）
 # 例: "https://your-app-name.onrender.com"
-APP_PUBLIC_URL = os.environ.get("APP_PUBLIC_URL", "https://palaeontologic-overmasteringly-emely.ngrok-free.dev")
+APP_PUBLIC_URL = os.environ.get("APP_PUBLIC_URL", "https://visai-1.onrender.com")
 
 if not all([LINE_CHANNEL_ACCESS_TOKEN, LINE_CHANNEL_SECRET, OPENAI_API_KEY]):
     print("🚨 必要な環境変数が設定されていません。アプリは実行されますが、LINEやOpenAIの機能は動作しません。")
