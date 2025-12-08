@@ -33,7 +33,9 @@ line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 web_hook_handler = WebhookHandler(LINE_CHANNEL_SECRET)
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-DB_NAME = "user_settings.db"
+# Renderでは /opt/render/project/src に書き込み権限がある
+DB_PATH = os.path.join(os.path.dirname(__file__), "user_settings.db")
+DB_NAME = DB_PATH
 
 # ニュースカテゴリ定義
 RSS_URL = {
@@ -51,53 +53,73 @@ RSS_URL = {
 # ==========================================
 def init_db():
     """データベースの初期化"""
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    # ユーザー設定テーブル: ID, 時間, ジャンル
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            user_id TEXT PRIMARY KEY,
-            delivery_time TEXT DEFAULT '08:00',
-            genre TEXT DEFAULT 'トップ'
-        )
-    ''')
-    conn.commit()
-    conn.close()
-    print("✅ Database initialized")
+    try:
+        # ディレクトリが存在するか確認
+        db_dir = os.path.dirname(DB_NAME)
+        if db_dir and not os.path.exists(db_dir):
+            os.makedirs(db_dir)
+        
+        conn = sqlite3.connect(DB_NAME)
+        c = conn.cursor()
+        # ユーザー設定テーブル: ID, 時間, ジャンル
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                user_id TEXT PRIMARY KEY,
+                delivery_time TEXT DEFAULT '08:00',
+                genre TEXT DEFAULT 'トップ'
+            )
+        ''')
+        conn.commit()
+        conn.close()
+        print(f"✅ Database initialized at {DB_NAME}")
+    except Exception as e:
+        print(f"❌ Database initialization error: {e}")
 
 def get_user_settings(user_id):
     """ユーザー設定を取得（なければデフォルトを作成）"""
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute('SELECT delivery_time, genre FROM users WHERE user_id = ?', (user_id,))
-    res = c.fetchone()
-    if res is None:
-        # 新規ユーザーはデフォルト登録
-        c.execute('INSERT INTO users (user_id, delivery_time, genre) VALUES (?, ?, ?)', (user_id, '08:00', 'トップ'))
-        conn.commit()
-        res = ('08:00', 'トップ')
-    conn.close()
-    return {"time": res[0], "genre": res[1]}
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        c = conn.cursor()
+        c.execute('SELECT delivery_time, genre FROM users WHERE user_id = ?', (user_id,))
+        res = c.fetchone()
+        if res is None:
+            # 新規ユーザーはデフォルト登録
+            c.execute('INSERT INTO users (user_id, delivery_time, genre) VALUES (?, ?, ?)', (user_id, '08:00', 'トップ'))
+            conn.commit()
+            res = ('08:00', 'トップ')
+        conn.close()
+        return {"time": res[0], "genre": res[1]}
+    except Exception as e:
+        print(f"❌ get_user_settings error: {e}")
+        return {"time": "08:00", "genre": "トップ"}
 
 def update_user_settings(user_id, delivery_time, genre):
     """ユーザー設定を更新"""
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute('''
-        INSERT INTO users (user_id, delivery_time, genre) VALUES (?, ?, ?)
-        ON CONFLICT(user_id) DO UPDATE SET delivery_time=excluded.delivery_time, genre=excluded.genre
-    ''', (user_id, delivery_time, genre))
-    conn.commit()
-    conn.close()
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        c = conn.cursor()
+        c.execute('''
+            INSERT INTO users (user_id, delivery_time, genre) VALUES (?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET delivery_time=excluded.delivery_time, genre=excluded.genre
+        ''', (user_id, delivery_time, genre))
+        conn.commit()
+        conn.close()
+        print(f"✅ Updated settings for {user_id}: {delivery_time}, {genre}")
+    except Exception as e:
+        print(f"❌ update_user_settings error: {e}")
 
 def get_users_by_time(target_time):
     """指定した時間に配信すべきユーザーリストを取得"""
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute('SELECT user_id, genre FROM users WHERE delivery_time = ?', (target_time,))
-    users = c.fetchall()
-    conn.close()
-    return users
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        c = conn.cursor()
+        c.execute('SELECT user_id, genre FROM users WHERE delivery_time = ?', (target_time,))
+        users = c.fetchall()
+        conn.close()
+        return users
+    except Exception as e:
+        print(f"❌ get_users_by_time error: {e}")
+        return []
 
 # ==========================================
 # ニュース取得・AI要約ロジック
@@ -302,7 +324,6 @@ def handle_message(event):
             "⚙️ 設定変更\n"
             "以下のリンクから配達時間とジャンルを変更できます。\n\n"
             f"{settings_url}\n\n"
-            "※リンクを知っている人は誰でも設定を変更できてしまうため、他人に教えないでください。"
         )
         line_bot_api.reply_message(event.reply_token, TextSendMessage(reply_text))
         return
