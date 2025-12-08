@@ -4,6 +4,7 @@ import threading
 import time
 import feedparser
 from datetime import datetime
+from pytz import timezone
 from flask import Flask, request, abort, render_template_string, url_for
 
 from linebot import LineBotApi, WebhookHandler
@@ -36,6 +37,9 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 # Renderでは /opt/render/project/src に書き込み権限がある
 DB_PATH = os.path.join(os.path.dirname(__file__), "user_settings.db")
 DB_NAME = DB_PATH
+
+# 日本時間のタイムゾーン
+JST = timezone('Asia/Tokyo')
 
 # ニュースカテゴリ定義
 RSS_URL = {
@@ -153,8 +157,8 @@ def generate_ai_summary(news_text, category):
     2. 絵文字を適度に使用し、視覚的に楽しく読みやすくしてください（例: 💡, 📰, ⚡）。
     3. 各記事をバラバラに要約するのではなく、重要なトピックを中心に流れを作って解説してください。
     4. 記事のURLは要約内には含めず、文章のみで構成してください（URLは別途付与するため）。
-    5. 時間帯によって冒頭に「おはようございます！」や「お疲れ様です！」など、読む人に寄り添う挨拶を入れてください。
-    6. それぞれのニュースに1.ニュースのタイトルの後にニュースを解説してほしいです。
+    5. 冒頭に「おはようございます！」や「お疲れ様です！」など、読む人に寄り添う挨拶を入れてください。
+    6. それぞれのニュースに1.「タイトル」の後にニュースを解説してほしいです。
 
     【ニュース内容】
     {news_text}
@@ -210,9 +214,17 @@ def push_news(user_id, category):
 def schedule_checker():
     """毎分実行し、設定時刻になったユーザーに送信"""
     while True:
-        now_str = datetime.now().strftime("%H:%M")
+        # 日本時間で現在時刻を取得
+        now_jst = datetime.now(JST)
+        now_str = now_jst.strftime("%H:%M")
+        
+        print(f"⏰ Current JST time: {now_str}")
+        
         # その時間のユーザーを取得
         targets = get_users_by_time(now_str)
+        
+        if targets:
+            print(f"📬 Found {len(targets)} user(s) to deliver at {now_str}")
         
         for user_id, genre in targets:
             # スレッドで並列処理（人数が多い場合の遅延防止）
@@ -324,6 +336,7 @@ def handle_message(event):
             "⚙️ 設定変更\n"
             "以下のリンクから配達時間とジャンルを変更できます。\n\n"
             f"{settings_url}\n\n"
+            "※リンクを知っている人は誰でも設定を変更できてしまうため、他人に教えないでください。"
         )
         line_bot_api.reply_message(event.reply_token, TextSendMessage(reply_text))
         return
