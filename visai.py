@@ -1,29 +1,41 @@
-from flask import Flask, request, abort, render_template_string
+import os
+import sqlite3
+import threading
+import time
+import feedparser
+from datetime import datetime
+from flask import Flask, request, abort, render_template_string, url_for
+
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage
-import feedparser
-import openai
-import threading
-import re
-from apscheduler.schedulers.background import BackgroundScheduler
-from datetime import datetime
+from openai import OpenAI
 
 app = Flask(__name__)
 
-# ここに自分のキーをそのまま書く
-LINE_CHANNEL_ACCESS_TOKEN = "bK+iKhs41Ng48iSxREkWy/bzt+oICA31xL7CtYE0P407xIXtbmZ/TGieQ695Rqr7wsBWkqak0lfalonJXgvkZKbVTzjF3+wcRT9uKADAEaCdaPiLwGUvjKQ0Hht15fEDcP/Slmg96++xNas+tMDZNQdB04t89/1O/w1cDnyilFU="
-LINE_CHANNEL_SECRET = "5bb44277689780213c3c32bc57720b50"
-OPENAI_API_KEY = "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"
+# ==========================================
+# 設定・定数
+# ==========================================
+
+# 環境変数から読み込むように変更
+LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
+LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+
+# アプリの公開URL（RenderのURLが確定したら修正）
+# 例: "https://your-app-name.onrender.com"
+APP_PUBLIC_URL = os.environ.get("APP_PUBLIC_URL", "https://palaeontologic-overmasteringly-emely.ngrok-free.dev")
+
+if not all([LINE_CHANNEL_ACCESS_TOKEN, LINE_CHANNEL_SECRET, OPENAI_API_KEY]):
+    print("🚨 必要な環境変数が設定されていません。アプリは実行されますが、LINEやOpenAIの機能は動作しません。")
 
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 web_hook_handler = WebhookHandler(LINE_CHANNEL_SECRET)
-client = openai.OpenAI(api_key=OPENAI_API_KEY)
+client = OpenAI(api_key=OPENAI_API_KEY)
 
-# ユーザー設定を保存
-user_settings = {}
+DB_NAME = "user_settings.db"
 
-# RSS URL
+# ニュースカテゴリ定義
 RSS_URL = {
     "トップ": "https://news.yahoo.co.jp/rss/topics/top-picks.xml",
     "社会": "https://news.yahoo.co.jp/rss/topics/domestic.xml",
@@ -32,303 +44,226 @@ RSS_URL = {
     "スポーツ": "https://news.yahoo.co.jp/rss/topics/sports.xml",
     "エンタメ": "https://news.yahoo.co.jp/rss/topics/entertainment.xml",
     "IT": "https://news.yahoo.co.jp/rss/topics/it.xml",
-    "ライフ": "https://news.yahoo.co.jp/rss/topics/life.xml",
 }
 
-# スケジューラー初期化
-scheduler = BackgroundScheduler(timezone="Asia/Tokyo")
-scheduler.start()
+# ==========================================
+# データベース関連 (SQLite)
+# ==========================================
+def init_db():
+    """データベースの初期化"""
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    # ユーザー設定テーブル: ID, 時間, ジャンル
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            user_id TEXT PRIMARY KEY,
+            delivery_time TEXT DEFAULT '08:00',
+            genre TEXT DEFAULT 'トップ'
+        )
+    ''')
+    conn.commit()
+    conn.close()
 
-
-# ------------------------------------------------------
-# ユーザー設定の取得
-# ------------------------------------------------------
 def get_user_settings(user_id):
-    if user_id not in user_settings:
-        user_settings[user_id] = {
-            "delivery_time": "08:00",
-            "category": "トップ"
-        }
-    return user_settings[user_id]
+    """ユーザー設定を取得（なければデフォルトを作成）"""
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute('SELECT delivery_time, genre FROM users WHERE user_id = ?', (user_id,))
+    res = c.fetchone()
+    if res is None:
+        # 新規ユーザーはデフォルト登録
+        c.execute('INSERT INTO users (user_id, delivery_time, genre) VALUES (?, ?, ?)', (user_id, '08:00', 'トップ'))
+        conn.commit()
+        res = ('08:00', 'トップ')
+    conn.close()
+    return {"time": res[0], "genre": res[1]}
 
+def update_user_settings(user_id, delivery_time, genre):
+    """ユーザー設定を更新"""
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute('''
+        INSERT INTO users (user_id, delivery_time, genre) VALUES (?, ?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET delivery_time=excluded.delivery_time, genre=excluded.genre
+    ''', (user_id, delivery_time, genre))
+    conn.commit()
+    conn.close()
 
-# ------------------------------------------------------
-# ニュース取得
-# ------------------------------------------------------
-def get_news(category="トップ"):
+def get_users_by_time(target_time):
+    """指定した時間に配信すべきユーザーリストを取得"""
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute('SELECT user_id, genre FROM users WHERE delivery_time = ?', (target_time,))
+    users = c.fetchall()
+    conn.close()
+    return users
+
+# ==========================================
+# ニュース取得・AI要約ロジック
+# ==========================================
+def get_news_content(category):
     if category not in RSS_URL:
         category = "トップ"
-
+    
     feed = feedparser.parse(RSS_URL[category])
     items = []
+    # ニュースを5件取得
     for entry in feed.entries[:5]:
-        items.append({
-            "title": entry.title,
-            "link": entry.link,
-            "summary": entry.summary if "summary" in entry else entry.title
-        })
-    return items
+        items.append(f"・{entry.title} ({entry.link})")
+    
+    return "\n".join(items)
 
-
-# ------------------------------------------------------
-# OpenAI 要約（絵文字付き、600文字程度）
-# ------------------------------------------------------
-def summarize_articles(articles, category):
-    prompt = (
-        f"以下はYahooニュース「{category}」の最新記事5件です。\n\n"
-        "【要約の条件】\n"
-        "- 全体で600文字程度にまとめてください\n"
-        "- 各記事を【記事1】【記事2】のように番号付きで分けてください\n"
-        "- 絵文字を適度に使用し、読みやすく親しみやすい文章にしてください\n"
-        "- ニュースの内容を分かりやすく、要点を押さえて伝えてください\n"
-        "- 各記事は2-3文程度で簡潔にまとめてください\n\n"
+def generate_ai_summary(news_text, category):
+    """
+    ニュース全体をまとめて600文字程度で要約する
+    """
+    system_prompt = (
+        "あなたは明るく親しみやすいニュース解説AIです。"
+        "ユーザーに最新情報をわかりやすく伝えてください。"
     )
+    
+    user_prompt = f"""
+    以下のニュース記事（ジャンル：{category}）を元に、LINEで送るニュースダイジェストを作成してください。
 
-    for i, art in enumerate(articles, 1):
-        prompt += (
-            f"記事{i}:\n"
-            f"タイトル: {art['title']}\n"
-            f"内容: {art['summary']}\n\n"
-        )
+    【条件】
+    1. 全体の文字数は「600文字程度」に収めてください。
+    2. 絵文字を適度に使用し、視覚的に楽しく読みやすくしてください（例: 💡, 📰, ⚡）。
+    3. 各記事をバラバラに要約するのではなく、重要なトピックを中心に流れを作って解説してください。
+    4. 記事のURLは要約内には含めず、文章のみで構成してください（URLは別途付与するため）。
+    5. 冒頭に「おはようございます！」や「お疲れ様です！」など、読む人に寄り添う挨拶を入れてください。
+    6. それぞれのニュースに1.「タイトル」の後にニュースを解説してほしいです。
+
+    【ニュース内容】
+    {news_text}
+    """
 
     try:
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
+            model="gpt-4o-mini", # コストパフォーマンスの良いモデルを指定
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
             max_tokens=800,
-            temperature=0.3
+            temperature=0.7
         )
         return response.choices[0].message.content.strip()
-
     except Exception as e:
-        print("OpenAI error:", e)
-        return None
+        print(f"OpenAI Error: {e}")
+        return "申し訳ありません。AIによる要約の生成に失敗しました。"
 
-
-# ------------------------------------------------------
-# 要約テキストを記事ごとに分割
-# ------------------------------------------------------
-def parse_summaries_block(summaries_text, articles):
-    if not summaries_text:
-        return [None] * len(articles)
-
-    pattern = r"【記事\s*(\d+)\】\s*(.*?)(?=【記事\s*\d+\】|$)"
-    matches = re.findall(pattern, summaries_text, flags=re.DOTALL)
-
-    if matches:
-        summaries_dict = {int(num): content.strip() for num, content in matches}
-        return [summaries_dict.get(i+1, "要約がありません。") for i in range(len(articles))]
-
-    return [summaries_text] + [None] * (len(articles) - 1)
-
-
-# ------------------------------------------------------
-# ニュース取得 → 要約 → Push
-# ------------------------------------------------------
-def process_and_push(user_id, category):
-    articles = get_news(category)
-
-    summaries_text = summarize_articles(articles, category)
-    if summaries_text is None:
-        line_bot_api.push_message(
-            user_id,
-            TextSendMessage("要約の取得に失敗しました。時間をおいてもう一度お試しください。")
-        )
+def push_news(user_id, category):
+    """指定ユーザーにニュースを送信する処理"""
+    print(f"Start pushing news to {user_id} (Genre: {category})")
+    
+    # 1. RSS取得
+    feed = feedparser.parse(RSS_URL.get(category, RSS_URL["トップ"]))
+    if not feed.entries:
         return
 
-    summaries = parse_summaries_block(summaries_text, articles)
+    # 2. AI用テキスト作成
+    articles_for_ai = []
+    for entry in feed.entries[:5]:
+        articles_for_ai.append(f"タイトル: {entry.title}\nリンク: {entry.link}")
+    input_text = "\n\n".join(articles_for_ai)
 
-    reply = f"📰 本日のニュースまとめ（{category}）\n\n"
-    for i, art in enumerate(articles, 1):
-        summary = summaries[i - 1] if i - 1 < len(summaries) and summaries[i - 1] else "要約がありません。"
-        reply += (
-            f"【{i}. {art['title']}】\n"
-            f"{summary}\n"
-            f"🔗 {art['link']}\n\n"
-        )
+    # 3. AI要約生成
+    summary_text = generate_ai_summary(input_text, category)
 
-    line_bot_api.push_message(user_id, TextSendMessage(reply))
-
-
-# ------------------------------------------------------
-# 定期配信
-# ------------------------------------------------------
-def scheduled_delivery():
-    print(f"[{datetime.now()}] Checking scheduled deliveries...")
-    current_time = datetime.now().strftime("%H:%M")
+    # 4. メッセージ構築
+    # AI要約 + リンク一覧という構成にする
+    links_text = "\n".join([f"🔗 {e.title[:15]}...\n{e.link}" for e in feed.entries[:5]]) # リンクは5つ添える
     
-    for user_id, settings in user_settings.items():
-        if settings["delivery_time"] == current_time:
-            print(f"Delivering to {user_id} at {current_time}")
-            threading.Thread(target=process_and_push, args=(user_id, settings["category"])).start()
+    final_message = f"{summary_text}\n\n👇 気になる記事をチェック\n{links_text}"
 
+    try:
+        line_bot_api.push_message(user_id, TextSendMessage(text=final_message))
+    except Exception as e:
+        print(f"Push Error: {e}")
 
-# スケジューラーに毎分実行を設定
-scheduler.add_job(scheduled_delivery, 'cron', minute='*')
-
-
-# ------------------------------------------------------
-# 設定画面HTML
-# ------------------------------------------------------
-SETTINGS_HTML = '''
-<!DOCTYPE html>
-<html lang="ja">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ニュース配信設定</title>
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            padding: 20px;
-        }
-        .container {
-            max-width: 500px;
-            margin: 0 auto;
-            background: white;
-            border-radius: 20px;
-            padding: 30px;
-            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
-        }
-        h1 {
-            color: #333;
-            margin-bottom: 10px;
-            font-size: 24px;
-        }
-        .subtitle {
-            color: #666;
-            margin-bottom: 30px;
-            font-size: 14px;
-        }
-        .form-group {
-            margin-bottom: 25px;
-        }
-        label {
-            display: block;
-            color: #333;
-            font-weight: 600;
-            margin-bottom: 10px;
-            font-size: 16px;
-        }
-        select, input[type="time"] {
-            width: 100%;
-            padding: 12px;
-            border: 2px solid #e0e0e0;
-            border-radius: 10px;
-            font-size: 16px;
-            transition: border 0.3s;
-        }
-        select:focus, input[type="time"]:focus {
-            outline: none;
-            border-color: #667eea;
-        }
-        .btn {
-            width: 100%;
-            padding: 15px;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            border: none;
-            border-radius: 10px;
-            font-size: 18px;
-            font-weight: 600;
-            cursor: pointer;
-            transition: transform 0.2s;
-        }
-        .btn:hover {
-            transform: translateY(-2px);
-        }
-        .current-settings {
-            background: #f5f5f5;
-            padding: 15px;
-            border-radius: 10px;
-            margin-bottom: 20px;
-        }
-        .current-settings p {
-            color: #666;
-            margin: 5px 0;
-        }
-        .success {
-            background: #4caf50;
-            color: white;
-            padding: 15px;
-            border-radius: 10px;
-            margin-bottom: 20px;
-            text-align: center;
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>📰 ニュース配信設定</h1>
-        <p class="subtitle">配信時間とカテゴリを選択してください</p>
+# ==========================================
+# スケジューラー（定期実行）
+# ==========================================
+def schedule_checker():
+    """毎分実行し、設定時刻になったユーザーに送信"""
+    while True:
+        now_str = datetime.now().strftime("%H:%M")
+        # その時間のユーザーを取得
+        targets = get_users_by_time(now_str)
         
-        {% if success %}
-        <div class="success">
-            ✅ 設定を保存しました！
-        </div>
-        {% endif %}
+        for user_id, genre in targets:
+            # スレッドで並列処理（人数が多い場合の遅延防止）
+            threading.Thread(target=push_news, args=(user_id, genre)).start()
         
-        <div class="current-settings">
-            <p><strong>現在の設定</strong></p>
-            <p>⏰ 配信時間: {{ current_time }}</p>
-            <p>📑 カテゴリ: {{ current_category }}</p>
-        </div>
-        
-        <form method="POST">
-            <div class="form-group">
-                <label for="delivery_time">⏰ 配信時間</label>
-                <input type="time" id="delivery_time" name="delivery_time" value="{{ current_time }}" required>
-            </div>
-            
-            <div class="form-group">
-                <label for="category">📑 ニュースカテゴリ</label>
-                <select id="category" name="category" required>
-                    <option value="トップ" {% if current_category == "トップ" %}selected{% endif %}>トップニュース</option>
-                    <option value="社会" {% if current_category == "社会" %}selected{% endif %}>社会</option>
-                    <option value="国際" {% if current_category == "国際" %}selected{% endif %}>国際</option>
-                    <option value="経済" {% if current_category == "経済" %}selected{% endif %}>経済</option>
-                    <option value="スポーツ" {% if current_category == "スポーツ" %}selected{% endif %}>スポーツ</option>
-                    <option value="エンタメ" {% if current_category == "エンタメ" %}selected{% endif %}>エンタメ</option>
-                    <option value="IT" {% if current_category == "IT" %}selected{% endif %}>IT</option>
-                    <option value="ライフ" {% if current_category == "ライフ" %}selected{% endif %}>ライフ</option>
-                </select>
-            </div>
-            
-            <button type="submit" class="btn">💾 設定を保存</button>
-        </form>
-    </div>
-</body>
-</html>
-'''
+        time.sleep(60)
 
-
-# ------------------------------------------------------
-# 設定画面ルート
-# ------------------------------------------------------
-@app.route("/settings/<user_id>", methods=['GET', 'POST'])
-def settings(user_id):
-    settings = get_user_settings(user_id)
-    success = False
+# ==========================================
+# Flask Webルート (設定画面)
+# ==========================================
+@app.route("/settings", methods=['GET', 'POST'])
+def settings():
+    user_id = request.args.get('user_id')
     
+    if not user_id:
+        return "エラー: ユーザーIDが見つかりません。LINEから再度アクセスしてください。"
+
     if request.method == 'POST':
-        settings["delivery_time"] = request.form.get("delivery_time")
-        settings["category"] = request.form.get("category")
-        success = True
+        new_time = request.form.get('delivery_time')
+        new_genre = request.form.get('genre')
+        
+        update_user_settings(user_id, new_time, new_genre)
+        
+        return """
+        <div style="text-align:center; padding: 20px; font-family: sans-serif;">
+            <h2>✅ 設定を保存しました！</h2>
+            <p>設定した時間にニュースが届きます。</p>
+            <p>LINEの画面に戻ってください。</p>
+        </div>
+        """
+
+    # 現在の設定を取得
+    current_settings = get_user_settings(user_id)
     
-    return render_template_string(
-        SETTINGS_HTML,
-        current_time=settings["delivery_time"],
-        current_category=settings["category"],
-        success=success
-    )
+    # 設定画面HTML
+    html = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>ニュース配信設定</title>
+        <style>
+            body {{ font-family: sans-serif; padding: 20px; background-color: #f0f0f0; }}
+            .container {{ max-width: 400px; margin: 0 auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }}
+            h2 {{ text-align: center; color: #333; }}
+            label {{ display: block; margin-top: 15px; font-weight: bold; }}
+            select, input[type="time"] {{ width: 100%; padding: 10px; margin-top: 5px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; }}
+            button {{ width: 100%; padding: 12px; background-color: #00B900; color: white; border: none; border-radius: 4px; margin-top: 20px; font-size: 16px; cursor: pointer; }}
+            button:hover {{ background-color: #009900; }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h2>⚙️ 配信設定</h2>
+            <form method="POST">
+                <label>配信時間:</label>
+                <input type="time" name="delivery_time" value="{current_settings['time']}" required>
+                
+                <label>ニュースジャンル:</label>
+                <select name="genre">
+                    {''.join([f'<option value="{k}" {"selected" if k == current_settings["genre"] else ""}>{k}</option>' for k in RSS_URL.keys()])}
+                </select>
+                
+                <button type="submit">設定を保存</button>
+            </form>
+        </div>
+    </body>
+    </html>
+    """
+    return render_template_string(html)
 
-
-# ------------------------------------------------------
-# LINE webhook
-# ------------------------------------------------------
+# ==========================================
+# LINE Webhook
+# ==========================================
 @app.route("/callback", methods=['POST'])
 def callback():
     signature = request.headers.get("X-Line-Signature")
@@ -341,62 +276,46 @@ def callback():
 
     return "OK"
 
-
-# ------------------------------------------------------
-# メッセージ処理
-# ------------------------------------------------------
 @web_hook_handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     user_id = event.source.user_id
     msg = event.message.text.strip()
 
-    # 「設定変更」→ 設定画面URLを送信
-    if msg == "設定変更":
-        settings_url = f"{request.url_root}settings/{user_id}"
-        text = f"⚙️ 設定変更はこちらから\n{settings_url}"
-        line_bot_api.reply_message(
-            event.reply_token,
-            TextSendMessage(text)
-        )
-        return
-
-    # 「今すぐ」→ 即座にニュース配信
+    # 1. 「今すぐ」: 現在の設定で即時配信
     if msg == "今すぐ":
         settings = get_user_settings(user_id)
-        line_bot_api.reply_message(
-            event.reply_token,
-            TextSendMessage("📰 ニュースをお届けします！少々お待ちください...")
+        # 重い処理なので別スレッドで実行
+        threading.Thread(target=push_news, args=(user_id, settings['genre'])).start()
+        return
+
+    # 2. 「設定変更」: 設定ページのリンクを案内
+    if msg == "設定変更":
+        # クエリパラメータにuser_idを含める（簡易的な実装）
+        settings_url = f"{APP_PUBLIC_URL}/settings?user_id={user_id}"
+        
+        reply_text = (
+            "⚙️ 設定変更\n"
+            "以下のリンクから配達時間とジャンルを変更できます。\n\n"
+            f"{settings_url}\n\n"
+            "※リンクを知っている人は誰でも設定を変更できてしまうため、他人に教えないでください。"
         )
-        threading.Thread(target=process_and_push, args=(user_id, settings["category"])).start()
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(reply_text))
         return
 
-    # カテゴリ指定
-    if msg in RSS_URL:
-        threading.Thread(target=process_and_push, args=(user_id, msg)).start()
-        return
-
-    # ヘルプメッセージ
-    text = (
-        "📰 ニュースBot 使い方\n\n"
-        "『設定変更』→ 配信時間とカテゴリを変更\n"
-        "『今すぐ』→ すぐにニュース配信\n"
-        "『社会』『経済』など → 指定カテゴリのニュース\n\n"
-        "※初期設定は毎朝8:00にトップニュースが届きます"
-    )
-
+    # 3. その他のメッセージ
     line_bot_api.reply_message(
         event.reply_token,
-        TextSendMessage(text)
+        TextSendMessage("💡メニュー\n・「今すぐ」: 今すぐニュースを受信\n・「設定変更」: 時間やジャンルを変更")
     )
 
-
-# ------------------------------------------------------
-# ヘルスチェック
-# ------------------------------------------------------
-@app.route("/")
-def health_check():
-    return "LINE News Bot is running!"
-
-
+# ==========================================
+# アプリ起動
+# ==========================================
 if __name__ == "__main__":
-    app.run(debug=True)
+     # ... DB初期化, スケジューラー起動
+     #  # RenderではGunicornなどのWSGIサーバーを使うため、この部分は実行しない
+     # pass
+      
+    @app.route("/")
+    def health_check():
+         return "OK"
