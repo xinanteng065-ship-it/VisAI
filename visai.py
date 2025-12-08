@@ -22,7 +22,7 @@ LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 
-# アプリの公開URL（RenderのURLが確定したら修正）
+# アプリの公開URL（RenderのURLが確定したら修正)
 # 例: "https://your-app-name.onrender.com"
 APP_PUBLIC_URL = os.environ.get("APP_PUBLIC_URL", "https://visai-1.onrender.com")
 
@@ -63,6 +63,7 @@ def init_db():
     ''')
     conn.commit()
     conn.close()
+    print("✅ Database initialized")
 
 def get_user_settings(user_id):
     """ユーザー設定を取得（なければデフォルトを作成）"""
@@ -123,7 +124,7 @@ def generate_ai_summary(news_text, category):
     )
     
     user_prompt = f"""
-    以下のニュース記事（ジャンル：{category}）を元に、LINEで送るニュースダイジェストを作成してください。
+    以下のニュース記事（ジャンル:{category}）を元に、LINEで送るニュースダイジェストを作成してください。
 
     【条件】
     1. 全体の文字数は「600文字程度」に収めてください。
@@ -200,6 +201,10 @@ def schedule_checker():
 # ==========================================
 # Flask Webルート (設定画面)
 # ==========================================
+@app.route("/")
+def health_check():
+    return "OK"
+
 @app.route("/settings", methods=['GET', 'POST'])
 def settings():
     user_id = request.args.get('user_id')
@@ -309,13 +314,19 @@ def handle_message(event):
     )
 
 # ==========================================
+# アプリ起動時の初期化
+# ==========================================
+# データベースを初期化（アプリ起動時に実行）
+init_db()
+
+# スケジューラーをバックグラウンドで起動
+scheduler_thread = threading.Thread(target=schedule_checker, daemon=True)
+scheduler_thread.start()
+print("✅ Scheduler started")
+
+# ==========================================
 # アプリ起動
 # ==========================================
 if __name__ == "__main__":
-     # ... DB初期化, スケジューラー起動
-     #  # RenderではGunicornなどのWSGIサーバーを使うため、この部分は実行しない
-     # pass
-      
-    @app.route("/")
-    def health_check():
-         return "OK"
+    # ローカル開発用
+    app.run(debug=True, host='0.0.0.0', port=10000)
