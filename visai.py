@@ -254,7 +254,7 @@ def push_news(user_id, category):
         if settings['delivery_count'] >= 6 and settings['support_message_shown'] == 0:
             support_message = (
                 "いつもVisAIを使ってくれてありがとうございます！🙏\n\n"
-                "このbotは学生の個人開発で、サーバー代やAIの利用料を自腹で運営しています。\n\n"
+                "このbotは中学生の個人開発で、サーバー代やAIの利用料を自腹で運営しています。\n\n"
                 "もし応援してもいいかなと思ってもらえたら、100円の応援PDFをBoothに置いています。\n"
                 "無理はしないでください🙏\n\n"
                 f"↓応援はこちらから\n{BOOTH_SUPPORT_URL}"
