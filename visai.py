@@ -27,6 +27,9 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 # 例: "https://your-app-name.onrender.com"
 APP_PUBLIC_URL = os.environ.get("APP_PUBLIC_URL", "https://visai-1.onrender.com")
 
+# ★ BOOTHのURL(実際のURLに変更してください)
+BOOTH_SUPPORT_URL = "https://visai.booth.pm/items/7763380"  # 例: "https://your-booth.booth.pm/items/1234567"
+
 if not all([LINE_CHANNEL_ACCESS_TOKEN, LINE_CHANNEL_SECRET, OPENAI_API_KEY]):
     print("🚨 必要な環境変数が設定されていません。アプリは実行されますが、LINEやOpenAIの機能は動作しません。")
 
@@ -65,12 +68,14 @@ def init_db():
         
         conn = sqlite3.connect(DB_NAME)
         c = conn.cursor()
-        # ユーザー設定テーブル: ID, 時間, ジャンル
+        # ユーザー設定テーブル: ID, 時間, ジャンル, 配信回数, 応援メッセージ表示済みフラグ
         c.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 user_id TEXT PRIMARY KEY,
                 delivery_time TEXT DEFAULT '08:00',
-                genre TEXT DEFAULT 'トップ'
+                genre TEXT DEFAULT 'トップ',
+                delivery_count INTEGER DEFAULT 0,
+                support_message_shown INTEGER DEFAULT 0
             )
         ''')
         conn.commit()
@@ -80,22 +85,28 @@ def init_db():
         print(f"❌ Database initialization error: {e}")
 
 def get_user_settings(user_id):
-    """ユーザー設定を取得（なければデフォルトを作成）"""
+    """ユーザー設定を取得(なければデフォルトを作成)"""
     try:
         conn = sqlite3.connect(DB_NAME)
         c = conn.cursor()
-        c.execute('SELECT delivery_time, genre FROM users WHERE user_id = ?', (user_id,))
+        c.execute('SELECT delivery_time, genre, delivery_count, support_message_shown FROM users WHERE user_id = ?', (user_id,))
         res = c.fetchone()
         if res is None:
             # 新規ユーザーはデフォルト登録
-            c.execute('INSERT INTO users (user_id, delivery_time, genre) VALUES (?, ?, ?)', (user_id, '08:00', 'トップ'))
+            c.execute('INSERT INTO users (user_id, delivery_time, genre, delivery_count, support_message_shown) VALUES (?, ?, ?, ?, ?)', 
+                     (user_id, '08:00', 'トップ', 0, 0))
             conn.commit()
-            res = ('08:00', 'トップ')
+            res = ('08:00', 'トップ', 0, 0)
         conn.close()
-        return {"time": res[0], "genre": res[1]}
+        return {
+            "time": res[0], 
+            "genre": res[1],
+            "delivery_count": res[2],
+            "support_message_shown": res[3]
+        }
     except Exception as e:
-        print(f"❌ get_user_settings error: {e}")
-        return {"time": "08:00", "genre": "トップ"}
+        print(f"❌ get_user_settings error for user {user_id}: {e}")
+        return {"time": "08:00", "genre": "トップ", "delivery_count": 0, "support_message_shown": 0}
 
 def update_user_settings(user_id, delivery_time, genre):
     """ユーザー設定を更新"""
@@ -103,14 +114,39 @@ def update_user_settings(user_id, delivery_time, genre):
         conn = sqlite3.connect(DB_NAME)
         c = conn.cursor()
         c.execute('''
-            INSERT INTO users (user_id, delivery_time, genre) VALUES (?, ?, ?)
+            INSERT INTO users (user_id, delivery_time, genre, delivery_count, support_message_shown) 
+            VALUES (?, ?, ?, 0, 0)
             ON CONFLICT(user_id) DO UPDATE SET delivery_time=excluded.delivery_time, genre=excluded.genre
         ''', (user_id, delivery_time, genre))
         conn.commit()
         conn.close()
         print(f"✅ Updated settings for {user_id}: {delivery_time}, {genre}")
     except Exception as e:
-        print(f"❌ update_user_settings error: {e}")
+        print(f"❌ update_user_settings error for user {user_id}: {e}")
+
+def increment_delivery_count(user_id):
+    """配信回数をインクリメント"""
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        c = conn.cursor()
+        c.execute('UPDATE users SET delivery_count = delivery_count + 1 WHERE user_id = ?', (user_id,))
+        conn.commit()
+        conn.close()
+        print(f"✅ Incremented delivery count for {user_id}")
+    except Exception as e:
+        print(f"❌ increment_delivery_count error for user {user_id}: {e}")
+
+def mark_support_message_shown(user_id):
+    """応援メッセージ表示済みフラグを立てる"""
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        c = conn.cursor()
+        c.execute('UPDATE users SET support_message_shown = 1 WHERE user_id = ?', (user_id,))
+        conn.commit()
+        conn.close()
+        print(f"✅ Marked support message as shown for {user_id}")
+    except Exception as e:
+        print(f"❌ mark_support_message_shown error for user {user_id}: {e}")
 
 def get_users_by_time(target_time):
     """指定した時間に配信すべきユーザーリストを取得"""
@@ -122,7 +158,7 @@ def get_users_by_time(target_time):
         conn.close()
         return users
     except Exception as e:
-        print(f"❌ get_users_by_time error: {e}")
+        print(f"❌ get_users_by_time error for time {target_time}: {e}")
         return []
 
 # ==========================================
@@ -150,14 +186,14 @@ def generate_ai_summary(news_text, category):
     )
     
     user_prompt = f"""
-    以下のニュース記事（ジャンル:{category}）を元に、LINEで送るニュースダイジェストを作成してください。
+    以下のニュース記事(ジャンル:{category})を元に、LINEで送るニュースダイジェストを作成してください。
 
     【条件】
     1. 全体の文字数は「600文字程度」に収めてください。
-    2. 絵文字を適度に使用し、視覚的に楽しく読みやすくしてください（例: 💡, 📰, ⚡）。
+    2. 絵文字を適度に使用し、視覚的に楽しく読みやすくしてください(例: 💡, 📰, ⚡)。
     3. 各記事をバラバラに要約するのではなく、重要なトピックを中心に流れを作って解説してください。
-    4. 記事のURLは要約内には含めず、文章のみで構成してください（URLは別途付与するため）。
-    5. 冒頭に「おはようございます！」や「お疲れ様です！」など、読む人に寄り添う挨拶を入れてください。
+    4. 記事のURLは要約内には含めず、文章のみで構成してください(URLは別途付与するため)。
+    5. 冒頭に「お疲れ様です!」など、読む人に寄り添う挨拶を入れてください。
     6. それぞれのニュースタイトルの前に数字をつけてください。その後にニュースを解説してほしいです。
 
     【ニュース内容】
@@ -166,7 +202,7 @@ def generate_ai_summary(news_text, category):
 
     try:
         response = client.chat.completions.create(
-            model="gpt-4o-mini", # コストパフォーマンスの良いモデルを指定
+            model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
@@ -176,59 +212,96 @@ def generate_ai_summary(news_text, category):
         )
         return response.choices[0].message.content.strip()
     except Exception as e:
-        print(f"OpenAI Error: {e}")
+        print(f"❌ OpenAI API Error: {e}")
         return "申し訳ありません。AIによる要約の生成に失敗しました。"
 
 def push_news(user_id, category):
     """指定ユーザーにニュースを送信する処理"""
-    print(f"Start pushing news to {user_id} (Genre: {category})")
+    timestamp = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
+    print(f"📤 [{timestamp}] Start pushing news to {user_id} (Genre: {category})")
     
-    # 1. RSS取得
-    feed = feedparser.parse(RSS_URL.get(category, RSS_URL["トップ"]))
-    if not feed.entries:
-        return
-
-    # 2. AI用テキスト作成
-    articles_for_ai = []
-    for entry in feed.entries[:5]:
-        articles_for_ai.append(f"タイトル: {entry.title}\nリンク: {entry.link}")
-    input_text = "\n\n".join(articles_for_ai)
-
-    # 3. AI要約生成
-    summary_text = generate_ai_summary(input_text, category)
-
-    # 4. メッセージ構築
-    # AI要約 + リンク一覧という構成にする
-    links_text = "\n".join([f"🔗 {e.title[:15]}...\n{e.link}" for e in feed.entries[:5]]) # リンクは5つ添える
-    
-    final_message = f"{summary_text}\n\n👇 気になる記事をチェック\n{links_text}"
-
     try:
+        # 1. RSS取得
+        feed = feedparser.parse(RSS_URL.get(category, RSS_URL["トップ"]))
+        if not feed.entries:
+            print(f"⚠️ [{timestamp}] No news entries found for {user_id} in category {category}")
+            return
+
+        # 2. AI用テキスト作成
+        articles_for_ai = []
+        for entry in feed.entries[:5]:
+            articles_for_ai.append(f"タイトル: {entry.title}\nリンク: {entry.link}")
+        input_text = "\n\n".join(articles_for_ai)
+
+        # 3. AI要約生成
+        summary_text = generate_ai_summary(input_text, category)
+
+        # 4. メッセージ構築
+        links_text = "\n".join([f"🔗 {e.title[:15]}...\n{e.link}" for e in feed.entries[:5]])
+        final_message = f"{summary_text}\n\n👇 気になる記事をチェック\n{links_text}"
+
+        # 5. LINE送信
         line_bot_api.push_message(user_id, TextSendMessage(text=final_message))
+        print(f"✅ [{timestamp}] Successfully sent news to {user_id}")
+        
+        # 6. 配信回数をインクリメント
+        increment_delivery_count(user_id)
+        
+        # 7. ユーザー設定を取得して応援メッセージチェック
+        settings = get_user_settings(user_id)
+        
+        # 8. 6回目の配信 かつ 応援メッセージ未表示の場合
+        if settings['delivery_count'] >= 6 and settings['support_message_shown'] == 0:
+            support_message = (
+                "いつもVisAIを使ってくれてありがとうございます！🙏\n\n"
+                "このbotは学生の個人開発で、サーバー代やAIの利用料を自腹で運営しています。\n\n"
+                "もし応援してもいいかなと思ってもらえたら、100円の応援PDFをBoothに置いています。\n"
+                "無理はしないでください🙏\n\n"
+                f"↓応援はこちらから\n{BOOTH_SUPPORT_URL}"
+            )
+            
+            try:
+                time.sleep(2)  # ニュース配信直後に送るのを避けるため少し待機
+                line_bot_api.push_message(user_id, TextSendMessage(text=support_message))
+                mark_support_message_shown(user_id)
+                print(f"💝 [{timestamp}] Support message sent to {user_id}")
+            except Exception as e:
+                print(f"❌ [{timestamp}] Failed to send support message to {user_id}: {e}")
+        
     except Exception as e:
-        print(f"Push Error: {e}")
+        print(f"❌ [{timestamp}] Push Error for {user_id}: {e}")
 
 # ==========================================
-# スケジューラー（定期実行）
+# スケジューラー(定期実行)
 # ==========================================
 def schedule_checker():
     """毎分実行し、設定時刻になったユーザーに送信"""
+    print("🚀 Scheduler thread started")
+    
     while True:
-        # 日本時間で現在時刻を取得
-        now_jst = datetime.now(JST)
-        now_str = now_jst.strftime("%H:%M")
-        
-        print(f"⏰ Current JST time: {now_str}")
-        
-        # その時間のユーザーを取得
-        targets = get_users_by_time(now_str)
-        
-        if targets:
-            print(f"📬 Found {len(targets)} user(s) to deliver at {now_str}")
-        
-        for user_id, genre in targets:
-            # スレッドで並列処理（人数が多い場合の遅延防止）
-            threading.Thread(target=push_news, args=(user_id, genre)).start()
+        try:
+            # 日本時間で現在時刻を取得
+            now_jst = datetime.now(JST)
+            now_str = now_jst.strftime("%H:%M")
+            timestamp = now_jst.strftime("%Y-%m-%d %H:%M:%S")
+            
+            print(f"⏰ [{timestamp}] Checking scheduled deliveries...")
+            
+            # その時間のユーザーを取得
+            targets = get_users_by_time(now_str)
+            
+            if targets:
+                print(f"📬 [{timestamp}] Found {len(targets)} user(s) to deliver at {now_str}")
+                for user_id, genre in targets:
+                    print(f"   → User: {user_id}, Genre: {genre}")
+                    # スレッドで並列処理(人数が多い場合の遅延防止)
+                    threading.Thread(target=push_news, args=(user_id, genre)).start()
+            else:
+                print(f"   No deliveries scheduled for {now_str}")
+            
+        except Exception as e:
+            error_time = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
+            print(f"❌ [{error_time}] Scheduler error: {e}")
         
         time.sleep(60)
 
@@ -242,19 +315,22 @@ def health_check():
 @app.route("/settings", methods=['GET', 'POST'])
 def settings():
     user_id = request.args.get('user_id')
+    timestamp = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
     
     if not user_id:
+        print(f"⚠️ [{timestamp}] Settings page accessed without user_id")
         return "エラー: ユーザーIDが見つかりません。LINEから再度アクセスしてください。"
 
     if request.method == 'POST':
         new_time = request.form.get('delivery_time')
         new_genre = request.form.get('genre')
         
+        print(f"⚙️ [{timestamp}] Settings update requested by {user_id}: time={new_time}, genre={new_genre}")
         update_user_settings(user_id, new_time, new_genre)
         
         return """
         <div style="text-align:center; padding: 20px; font-family: sans-serif;">
-            <h2>✅ 設定を保存しました！</h2>
+            <h2>✅ 設定を保存しました!</h2>
             <p>設定した時間にニュースが届きます。</p>
             <p>LINEの画面に戻ってください。</p>
         </div>
@@ -262,6 +338,7 @@ def settings():
 
     # 現在の設定を取得
     current_settings = get_user_settings(user_id)
+    print(f"📖 [{timestamp}] Settings page accessed by {user_id}")
     
     # 設定画面HTML
     html = f"""
@@ -311,6 +388,8 @@ def callback():
     try:
         web_hook_handler.handle(body, signature)
     except InvalidSignatureError:
+        timestamp = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
+        print(f"❌ [{timestamp}] Invalid signature received")
         abort(400)
 
     return "OK"
@@ -319,17 +398,20 @@ def callback():
 def handle_message(event):
     user_id = event.source.user_id
     msg = event.message.text.strip()
+    timestamp = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
+    
+    print(f"💬 [{timestamp}] Message received from {user_id}: '{msg}'")
 
     # 1. 「今すぐ」: 現在の設定で即時配信
     if msg == "今すぐ":
         settings = get_user_settings(user_id)
+        print(f"🚀 [{timestamp}] Immediate delivery requested by {user_id}")
         # 重い処理なので別スレッドで実行
         threading.Thread(target=push_news, args=(user_id, settings['genre'])).start()
         return
 
     # 2. 「設定変更」: 設定ページのリンクを案内
     if msg == "設定変更":
-        # クエリパラメータにuser_idを含める（簡易的な実装）
         settings_url = f"{APP_PUBLIC_URL}/settings?user_id={user_id}"
         
         reply_text = (
@@ -339,6 +421,7 @@ def handle_message(event):
             "※リンクを知っている人は誰でも設定を変更できてしまうため、他人に教えないでください。"
         )
         line_bot_api.reply_message(event.reply_token, TextSendMessage(reply_text))
+        print(f"⚙️ [{timestamp}] Settings link sent to {user_id}")
         return
 
     # 3. その他のメッセージ
@@ -346,17 +429,20 @@ def handle_message(event):
         event.reply_token,
         TextSendMessage("💡メニュー\n・「今すぐ」: 今すぐニュースを受信\n・「設定変更」: 時間やジャンルを変更")
     )
+    print(f"ℹ️ [{timestamp}] Help menu sent to {user_id}")
 
 # ==========================================
 # アプリ起動時の初期化
 # ==========================================
-# データベースを初期化（アプリ起動時に実行）
+# データベースを初期化(アプリ起動時に実行)
 init_db()
 
 # スケジューラーをバックグラウンドで起動
 scheduler_thread = threading.Thread(target=schedule_checker, daemon=True)
 scheduler_thread.start()
-print("✅ Scheduler started")
+
+startup_time = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
+print(f"✅ [{startup_time}] VisAI LINE Bot started successfully")
 
 # ==========================================
 # アプリ起動
