@@ -18,33 +18,28 @@ app = Flask(__name__)
 # 設定・定数
 # ==========================================
 
-# 環境変数から読み込むように変更
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 
-# アプリの公開URL（RenderのURLが確定したら修正)
-# 例: "https://your-app-name.onrender.com"
 APP_PUBLIC_URL = os.environ.get("APP_PUBLIC_URL", "https://visai-1.onrender.com")
+BOOTH_SUPPORT_URL = "https://visai.booth.pm/items/7763380"
 
-# ★ BOOTHのURL(実際のURLに変更してください)
-BOOTH_SUPPORT_URL = "https://visai.booth.pm/items/7763380"  # 例: "https://your-booth.booth.pm/items/1234567"
+# 🔧 PostgreSQL接続情報（Renderの永続DB用）
+DATABASE_URL = os.environ.get("DATABASE_URL")
 
 if not all([LINE_CHANNEL_ACCESS_TOKEN, LINE_CHANNEL_SECRET, OPENAI_API_KEY]):
-    print("🚨 必要な環境変数が設定されていません。アプリは実行されますが、LINEやOpenAIの機能は動作しません。")
+    print("🚨 必要な環境変数が設定されていません。")
 
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 web_hook_handler = WebhookHandler(LINE_CHANNEL_SECRET)
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# Renderでは /opt/render/project/src に書き込み権限がある
+# SQLite用のパス（PostgreSQLが使えない場合のフォールバック）
 DB_PATH = os.path.join(os.path.dirname(__file__), "user_settings.db")
-DB_NAME = DB_PATH
 
-# 日本時間のタイムゾーン
 JST = timezone('Asia/Tokyo')
 
-# ニュースカテゴリ定義
 RSS_URL = {
     "トップ": "https://news.yahoo.co.jp/rss/topics/top-picks.xml",
     "社会": "https://news.yahoo.co.jp/rss/topics/domestic.xml",
@@ -56,47 +51,83 @@ RSS_URL = {
 }
 
 # ==========================================
-# データベース関連 (SQLite)
+# データベース接続管理
+# ==========================================
+def get_db_connection():
+    """PostgreSQLまたはSQLiteへの接続を返す"""
+    if DATABASE_URL:
+        # PostgreSQLを使用（本番環境）
+        import psycopg2
+        from urllib.parse import urlparse
+        
+        result = urlparse(DATABASE_URL)
+        conn = psycopg2.connect(
+            dbname=result.path[1:],
+            user=result.username,
+            password=result.password,
+            host=result.hostname,
+            port=result.port
+        )
+        return conn, 'postgres'
+    else:
+        # SQLiteを使用（開発環境）
+        conn = sqlite3.connect(DB_PATH)
+        return conn, 'sqlite'
+
+# ==========================================
+# データベース関連
 # ==========================================
 def init_db():
     """データベースの初期化"""
     try:
-        # ディレクトリが存在するか確認
-        db_dir = os.path.dirname(DB_NAME)
-        if db_dir and not os.path.exists(db_dir):
-            os.makedirs(db_dir)
-        
-        conn = sqlite3.connect(DB_NAME)
+        conn, db_type = get_db_connection()
         c = conn.cursor()
-        # ユーザー設定テーブル: ID, 時間, ジャンル, 配信回数, 応援メッセージ表示済みフラグ
-        c.execute('''
-            CREATE TABLE IF NOT EXISTS users (
-                user_id TEXT PRIMARY KEY,
-                delivery_time TEXT DEFAULT '08:00',
-                genre TEXT DEFAULT 'トップ',
-                delivery_count INTEGER DEFAULT 0,
-                support_message_shown INTEGER DEFAULT 0
-            )
-        ''')
+        
+        if db_type == 'postgres':
+            c.execute('''
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id TEXT PRIMARY KEY,
+                    delivery_time TEXT DEFAULT '08:00',
+                    genre TEXT DEFAULT 'トップ',
+                    delivery_count INTEGER DEFAULT 0,
+                    support_message_shown INTEGER DEFAULT 0
+                )
+            ''')
+        else:
+            c.execute('''
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id TEXT PRIMARY KEY,
+                    delivery_time TEXT DEFAULT '08:00',
+                    genre TEXT DEFAULT 'トップ',
+                    delivery_count INTEGER DEFAULT 0,
+                    support_message_shown INTEGER DEFAULT 0
+                )
+            ''')
+        
         conn.commit()
         conn.close()
-        print(f"✅ Database initialized at {DB_NAME}")
+        print(f"✅ Database initialized ({db_type})")
     except Exception as e:
         print(f"❌ Database initialization error: {e}")
 
 def get_user_settings(user_id):
-    """ユーザー設定を取得(なければデフォルトを作成)"""
+    """ユーザー設定を取得"""
     try:
-        conn = sqlite3.connect(DB_NAME)
+        conn, db_type = get_db_connection()
         c = conn.cursor()
-        c.execute('SELECT delivery_time, genre, delivery_count, support_message_shown FROM users WHERE user_id = ?', (user_id,))
+        c.execute('SELECT delivery_time, genre, delivery_count, support_message_shown FROM users WHERE user_id = %s' if db_type == 'postgres' else 'SELECT delivery_time, genre, delivery_count, support_message_shown FROM users WHERE user_id = ?', (user_id,))
         res = c.fetchone()
+        
         if res is None:
-            # 新規ユーザーはデフォルト登録
-            c.execute('INSERT INTO users (user_id, delivery_time, genre, delivery_count, support_message_shown) VALUES (?, ?, ?, ?, ?)', 
-                     (user_id, '08:00', 'トップ', 0, 0))
+            if db_type == 'postgres':
+                c.execute('INSERT INTO users (user_id, delivery_time, genre, delivery_count, support_message_shown) VALUES (%s, %s, %s, %s, %s)', 
+                         (user_id, '08:00', 'トップ', 0, 0))
+            else:
+                c.execute('INSERT INTO users (user_id, delivery_time, genre, delivery_count, support_message_shown) VALUES (?, ?, ?, ?, ?)', 
+                         (user_id, '08:00', 'トップ', 0, 0))
             conn.commit()
             res = ('08:00', 'トップ', 0, 0)
+        
         conn.close()
         return {
             "time": res[0], 
@@ -111,13 +142,22 @@ def get_user_settings(user_id):
 def update_user_settings(user_id, delivery_time, genre):
     """ユーザー設定を更新"""
     try:
-        conn = sqlite3.connect(DB_NAME)
+        conn, db_type = get_db_connection()
         c = conn.cursor()
-        c.execute('''
-            INSERT INTO users (user_id, delivery_time, genre, delivery_count, support_message_shown) 
-            VALUES (?, ?, ?, 0, 0)
-            ON CONFLICT(user_id) DO UPDATE SET delivery_time=excluded.delivery_time, genre=excluded.genre
-        ''', (user_id, delivery_time, genre))
+        
+        if db_type == 'postgres':
+            c.execute('''
+                INSERT INTO users (user_id, delivery_time, genre, delivery_count, support_message_shown) 
+                VALUES (%s, %s, %s, 0, 0)
+                ON CONFLICT(user_id) DO UPDATE SET delivery_time=EXCLUDED.delivery_time, genre=EXCLUDED.genre
+            ''', (user_id, delivery_time, genre))
+        else:
+            c.execute('''
+                INSERT INTO users (user_id, delivery_time, genre, delivery_count, support_message_shown) 
+                VALUES (?, ?, ?, 0, 0)
+                ON CONFLICT(user_id) DO UPDATE SET delivery_time=excluded.delivery_time, genre=excluded.genre
+            ''', (user_id, delivery_time, genre))
+        
         conn.commit()
         conn.close()
         print(f"✅ Updated settings for {user_id}: {delivery_time}, {genre}")
@@ -127,9 +167,12 @@ def update_user_settings(user_id, delivery_time, genre):
 def increment_delivery_count(user_id):
     """配信回数をインクリメント"""
     try:
-        conn = sqlite3.connect(DB_NAME)
+        conn, db_type = get_db_connection()
         c = conn.cursor()
-        c.execute('UPDATE users SET delivery_count = delivery_count + 1 WHERE user_id = ?', (user_id,))
+        
+        placeholder = '%s' if db_type == 'postgres' else '?'
+        c.execute(f'UPDATE users SET delivery_count = delivery_count + 1 WHERE user_id = {placeholder}', (user_id,))
+        
         conn.commit()
         conn.close()
         print(f"✅ Incremented delivery count for {user_id}")
@@ -139,9 +182,12 @@ def increment_delivery_count(user_id):
 def mark_support_message_shown(user_id):
     """応援メッセージ表示済みフラグを立てる"""
     try:
-        conn = sqlite3.connect(DB_NAME)
+        conn, db_type = get_db_connection()
         c = conn.cursor()
-        c.execute('UPDATE users SET support_message_shown = 1 WHERE user_id = ?', (user_id,))
+        
+        placeholder = '%s' if db_type == 'postgres' else '?'
+        c.execute(f'UPDATE users SET support_message_shown = 1 WHERE user_id = {placeholder}', (user_id,))
+        
         conn.commit()
         conn.close()
         print(f"✅ Marked support message as shown for {user_id}")
@@ -151,10 +197,13 @@ def mark_support_message_shown(user_id):
 def get_users_by_time(target_time):
     """指定した時間に配信すべきユーザーリストを取得"""
     try:
-        conn = sqlite3.connect(DB_NAME)
+        conn, db_type = get_db_connection()
         c = conn.cursor()
-        c.execute('SELECT user_id, genre FROM users WHERE delivery_time = ?', (target_time,))
+        
+        placeholder = '%s' if db_type == 'postgres' else '?'
+        c.execute(f'SELECT user_id, genre FROM users WHERE delivery_time = {placeholder}', (target_time,))
         users = c.fetchall()
+        
         conn.close()
         return users
     except Exception as e:
@@ -170,16 +219,13 @@ def get_news_content(category):
     
     feed = feedparser.parse(RSS_URL[category])
     items = []
-    # ニュースを5件取得
     for entry in feed.entries[:5]:
         items.append(f"・{entry.title} ({entry.link})")
     
     return "\n".join(items)
 
 def generate_ai_summary(news_text, category):
-    """
-    ニュース全体をまとめて600文字程度で要約する
-    """
+    """ニュース全体をまとめて600文字程度で要約する"""
     system_prompt = (
         "あなたは明るく親しみやすいニュース解説AIです。"
         "ユーザーに最新情報をわかりやすく伝えてください。"
@@ -221,47 +267,39 @@ def push_news(user_id, category):
     print(f"📤 [{timestamp}] Start pushing news to {user_id} (Genre: {category})")
     
     try:
-        # 1. RSS取得
         feed = feedparser.parse(RSS_URL.get(category, RSS_URL["トップ"]))
         if not feed.entries:
             print(f"⚠️ [{timestamp}] No news entries found for {user_id} in category {category}")
             return
 
-        # 2. AI用テキスト作成
         articles_for_ai = []
         for entry in feed.entries[:5]:
             articles_for_ai.append(f"タイトル: {entry.title}\nリンク: {entry.link}")
         input_text = "\n\n".join(articles_for_ai)
 
-        # 3. AI要約生成
         summary_text = generate_ai_summary(input_text, category)
 
-        # 4. メッセージ構築
         links_text = "\n".join([f"🔗 {e.title[:15]}...\n{e.link}" for e in feed.entries[:5]])
         final_message = f"{summary_text}\n\n👇 気になる記事をチェック\n{links_text}"
 
-        # 5. LINE送信
         line_bot_api.push_message(user_id, TextSendMessage(text=final_message))
         print(f"✅ [{timestamp}] Successfully sent news to {user_id}")
         
-        # 6. 配信回数をインクリメント
         increment_delivery_count(user_id)
         
-        # 7. ユーザー設定を取得して応援メッセージチェック
         settings = get_user_settings(user_id)
         
-        # 8. 6回目の配信 かつ 応援メッセージ未表示の場合
         if settings['delivery_count'] >= 6 and settings['support_message_shown'] == 0:
             support_message = (
                 "いつもVisAIを使ってくれてありがとうございます！🙏\n\n"
-                "このbotは中学生の個人開発で、サーバー代やAIの利用料を自腹で運営しています。\n\n"
+                "このbotは学生の個人開発で、サーバー代やAIの利用料を自腹で運営しています。\n\n"
                 "もし応援してもいいかなと思ってもらえたら、100円の応援PDFをBoothに置いています。\n"
                 "無理はしないでください🙏\n\n"
                 f"↓応援はこちらから\n{BOOTH_SUPPORT_URL}"
             )
             
             try:
-                time.sleep(2)  # ニュース配信直後に送るのを避けるため少し待機
+                time.sleep(2)
                 line_bot_api.push_message(user_id, TextSendMessage(text=support_message))
                 mark_support_message_shown(user_id)
                 print(f"💝 [{timestamp}] Support message sent to {user_id}")
@@ -272,41 +310,58 @@ def push_news(user_id, category):
         print(f"❌ [{timestamp}] Push Error for {user_id}: {e}")
 
 # ==========================================
-# スケジューラー(定期実行)
+# スケジューラー（改善版）
 # ==========================================
 def schedule_checker():
-    """毎分実行し、設定時刻になったユーザーに送信"""
+    """毎分00秒に正確に実行"""
     print("🚀 Scheduler thread started")
+    
+    # 起動時に次の分まで待機
+    now = datetime.now(JST)
+    wait_seconds = 60 - now.second
+    print(f"⏱️ Waiting {wait_seconds}s to sync with minute boundary...")
+    time.sleep(wait_seconds)
+    
+    last_checked_minute = None
     
     while True:
         try:
-            # 日本時間で現在時刻を取得
             now_jst = datetime.now(JST)
-            now_str = now_jst.strftime("%H:%M")
+            current_time_str = now_jst.strftime("%H:%M")
+            current_minute_key = now_jst.strftime("%Y%m%d%H%M")
             timestamp = now_jst.strftime("%Y-%m-%d %H:%M:%S")
             
-            print(f"⏰ [{timestamp}] Checking scheduled deliveries...")
+            # 同じ分に複数回実行しないようにチェック
+            if current_minute_key == last_checked_minute:
+                time.sleep(1)  # 短いスリープで次のループへ
+                continue
             
-            # その時間のユーザーを取得
-            targets = get_users_by_time(now_str)
+            last_checked_minute = current_minute_key
+            
+            print(f"⏰ [{timestamp}] Checking scheduled deliveries for {current_time_str}...")
+            
+            targets = get_users_by_time(current_time_str)
             
             if targets:
-                print(f"📬 [{timestamp}] Found {len(targets)} user(s) to deliver at {now_str}")
+                print(f"📬 [{timestamp}] Found {len(targets)} user(s) to deliver")
                 for user_id, genre in targets:
                     print(f"   → User: {user_id}, Genre: {genre}")
-                    # スレッドで並列処理(人数が多い場合の遅延防止)
-                    threading.Thread(target=push_news, args=(user_id, genre)).start()
+                    threading.Thread(target=push_news, args=(user_id, genre), daemon=True).start()
             else:
-                print(f"   No deliveries scheduled for {now_str}")
+                print(f"   No deliveries scheduled for {current_time_str}")
+            
+            # 次の分の00秒まで待機
+            now = datetime.now(JST)
+            wait_seconds = 60 - now.second
+            time.sleep(wait_seconds)
             
         except Exception as e:
             error_time = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
             print(f"❌ [{error_time}] Scheduler error: {e}")
-        
-        time.sleep(60)
+            time.sleep(60)
 
 # ==========================================
-# Flask Webルート (設定画面)
+# Flask Webルート
 # ==========================================
 @app.route("/")
 def health_check():
@@ -336,11 +391,9 @@ def settings():
         </div>
         """
 
-    # 現在の設定を取得
     current_settings = get_user_settings(user_id)
     print(f"📖 [{timestamp}] Settings page accessed by {user_id}")
     
-    # 設定画面HTML
     html = f"""
     <!DOCTYPE html>
     <html>
@@ -402,15 +455,13 @@ def handle_message(event):
     
     print(f"💬 [{timestamp}] Message received from {user_id}: '{msg}'")
 
-    # 1. 「今すぐ」: 現在の設定で即時配信
     if msg == "今すぐ":
         settings = get_user_settings(user_id)
         print(f"🚀 [{timestamp}] Immediate delivery requested by {user_id}")
-        # 重い処理なので別スレッドで実行
-        threading.Thread(target=push_news, args=(user_id, settings['genre'])).start()
+        threading.Thread(target=push_news, args=(user_id, settings['genre']), daemon=True).start()
+        line_bot_api.reply_message(event.reply_token, TextSendMessage("📰 ニュースを取得中です...少々お待ちください！"))
         return
 
-    # 2. 「設定変更」: 設定ページのリンクを案内
     if msg == "設定変更":
         settings_url = f"{APP_PUBLIC_URL}/settings?user_id={user_id}"
         
@@ -424,7 +475,6 @@ def handle_message(event):
         print(f"⚙️ [{timestamp}] Settings link sent to {user_id}")
         return
 
-    # 3. その他のメッセージ
     line_bot_api.reply_message(
         event.reply_token,
         TextSendMessage("💡メニュー\n・「今すぐ」: 今すぐニュースを受信\n・「設定変更」: 時間やジャンルを変更")
@@ -434,19 +484,13 @@ def handle_message(event):
 # ==========================================
 # アプリ起動時の初期化
 # ==========================================
-# データベースを初期化(アプリ起動時に実行)
 init_db()
 
-# スケジューラーをバックグラウンドで起動
 scheduler_thread = threading.Thread(target=schedule_checker, daemon=True)
 scheduler_thread.start()
 
 startup_time = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
 print(f"✅ [{startup_time}] VisAI LINE Bot started successfully")
 
-# ==========================================
-# アプリ起動
-# ==========================================
 if __name__ == "__main__":
-    # ローカル開発用
     app.run(debug=True, host='0.0.0.0', port=10000)
