@@ -1,16 +1,11 @@
 import os
-import json
+import sqlite3
 import threading
 import time
 import feedparser
-import requests
-from datetime import datetime, timedelta
+from datetime import datetime
 from pytz import timezone
-from flask import Flask, request, abort, render_template_string
-from bs4 import BeautifulSoup
-from collections import Counter
-import re
-from pathlib import Path
+from flask import Flask, request, abort, render_template_string, url_for
 
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
@@ -27,8 +22,11 @@ LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 
-APP_PUBLIC_URL = os.environ.get("APP_PUBLIC_URL", "https://visai.onrender.com")
+APP_PUBLIC_URL = os.environ.get("APP_PUBLIC_URL", "https://visai-1.onrender.com")
 BOOTH_SUPPORT_URL = "https://visai.booth.pm/items/7763380"
+
+# 🔧 PostgreSQL接続情報（Renderの永続DB用）
+DATABASE_URL = os.environ.get("DATABASE_URL")
 
 if not all([LINE_CHANNEL_ACCESS_TOKEN, LINE_CHANNEL_SECRET, OPENAI_API_KEY]):
     print("🚨 必要な環境変数が設定されていません。")
@@ -37,386 +35,294 @@ line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 web_hook_handler = WebhookHandler(LINE_CHANNEL_SECRET)
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# JSONファイルのパス
-DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
-USER_DATA_FILE = os.path.join(DATA_DIR, "user_settings.json")
+# SQLite用のパス（PostgreSQLが使えない場合のフォールバック）
+DB_PATH = os.path.join(os.path.dirname(__file__), "user_settings.db")
 
 JST = timezone('Asia/Tokyo')
 
-# ファイルロック用
-data_lock = threading.Lock()
-
-# ==========================================
-# 多角的ニュース比較用のRSSフィード設定
-# ==========================================
-
-NEWS_SOURCES = {
-    "Yahoo": {
-        "トップ": "https://news.yahoo.co.jp/rss/topics/top-picks.xml",
-        "社会": "https://news.yahoo.co.jp/rss/topics/domestic.xml",
-        "国際": "https://news.yahoo.co.jp/rss/topics/world.xml",
-        "経済": "https://news.yahoo.co.jp/rss/topics/business.xml",
-        "スポーツ": "https://news.yahoo.co.jp/rss/topics/sports.xml",
-        "エンタメ": "https://news.yahoo.co.jp/rss/topics/entertainment.xml",
-        "IT": "https://news.yahoo.co.jp/rss/topics/it.xml",
-    }
+RSS_URL = {
+    "トップ": "https://news.yahoo.co.jp/rss/topics/top-picks.xml",
+    "社会": "https://news.yahoo.co.jp/rss/topics/domestic.xml",
+    "国際": "https://news.yahoo.co.jp/rss/topics/world.xml",
+    "経済": "https://news.yahoo.co.jp/rss/topics/business.xml",
+    "スポーツ": "https://news.yahoo.co.jp/rss/topics/sports.xml",
+    "エンタメ": "https://news.yahoo.co.jp/rss/topics/entertainment.xml",
+    "IT": "https://news.yahoo.co.jp/rss/topics/it.xml",
 }
 
 # ==========================================
-# JSONベースのデータ管理
+# データベース接続管理
 # ==========================================
-
-def init_data_storage():
-    """データ保存用ディレクトリとファイルを初期化"""
-    try:
-        # ディレクトリ作成
-        Path(DATA_DIR).mkdir(parents=True, exist_ok=True)
+def get_db_connection():
+    """PostgreSQLまたはSQLiteへの接続を返す"""
+    if DATABASE_URL:
+        # PostgreSQLを使用（本番環境）
+        import psycopg2
+        from urllib.parse import urlparse
         
-        # ファイルが存在しない場合は空のJSONを作成
-        if not os.path.exists(USER_DATA_FILE):
-            with open(USER_DATA_FILE, 'w', encoding='utf-8') as f:
-                json.dump({}, f, ensure_ascii=False, indent=2)
-            print("✅ JSON data storage initialized")
+        result = urlparse(DATABASE_URL)
+        conn = psycopg2.connect(
+            dbname=result.path[1:],
+            user=result.username,
+            password=result.password,
+            host=result.hostname,
+            port=result.port
+        )
+        return conn, 'postgres'
+    else:
+        # SQLiteを使用（開発環境）
+        conn = sqlite3.connect(DB_PATH)
+        return conn, 'sqlite'
+
+# ==========================================
+# データベース関連
+# ==========================================
+def init_db():
+    """データベースの初期化"""
+    try:
+        conn, db_type = get_db_connection()
+        c = conn.cursor()
+        
+        if db_type == 'postgres':
+            c.execute('''
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id TEXT PRIMARY KEY,
+                    delivery_time TEXT DEFAULT '08:00',
+                    genre TEXT DEFAULT 'トップ',
+                    delivery_count INTEGER DEFAULT 0,
+                    support_message_shown INTEGER DEFAULT 0
+                )
+            ''')
         else:
-            print("✅ JSON data storage found")
+            c.execute('''
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id TEXT PRIMARY KEY,
+                    delivery_time TEXT DEFAULT '08:00',
+                    genre TEXT DEFAULT 'トップ',
+                    delivery_count INTEGER DEFAULT 0,
+                    support_message_shown INTEGER DEFAULT 0
+                )
+            ''')
+        
+        conn.commit()
+        conn.close()
+        print(f"✅ Database initialized ({db_type})")
     except Exception as e:
-        print(f"❌ Data storage initialization error: {e}")
-
-def load_user_data():
-    """ユーザーデータをJSONファイルから読み込み"""
-    try:
-        with data_lock:
-            if os.path.exists(USER_DATA_FILE):
-                with open(USER_DATA_FILE, 'r', encoding='utf-8') as f:
-                    return json.load(f)
-            return {}
-    except Exception as e:
-        print(f"❌ Error loading user data: {e}")
-        return {}
-
-def save_user_data(data):
-    """ユーザーデータをJSONファイルに保存"""
-    try:
-        with data_lock:
-            with open(USER_DATA_FILE, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"❌ Error saving user data: {e}")
+        print(f"❌ Database initialization error: {e}")
 
 def get_user_settings(user_id):
-    """ユーザーの設定を取得"""
+    """ユーザー設定を取得"""
     try:
-        all_data = load_user_data()
+        conn, db_type = get_db_connection()
+        c = conn.cursor()
+        c.execute('SELECT delivery_time, genre, delivery_count, support_message_shown FROM users WHERE user_id = %s' if db_type == 'postgres' else 'SELECT delivery_time, genre, delivery_count, support_message_shown FROM users WHERE user_id = ?', (user_id,))
+        res = c.fetchone()
         
-        if user_id not in all_data:
-            # デフォルト設定で新規ユーザーを作成
-            all_data[user_id] = {
-                "delivery_time": "08:00",
-                "genre": "トップ",
-                "delivery_count": 0,
-                "support_message_shown": 0,
-                "comparison_mode": 1
-            }
-            save_user_data(all_data)
+        if res is None:
+            if db_type == 'postgres':
+                c.execute('INSERT INTO users (user_id, delivery_time, genre, delivery_count, support_message_shown) VALUES (%s, %s, %s, %s, %s)', 
+                         (user_id, '08:00', 'トップ', 0, 0))
+            else:
+                c.execute('INSERT INTO users (user_id, delivery_time, genre, delivery_count, support_message_shown) VALUES (?, ?, ?, ?, ?)', 
+                         (user_id, '08:00', 'トップ', 0, 0))
+            conn.commit()
+            res = ('08:00', 'トップ', 0, 0)
         
-        return all_data[user_id]
-    except Exception as e:
-        print(f"❌ get_user_settings error: {e}")
+        conn.close()
         return {
-            "delivery_time": "08:00",
-            "genre": "トップ",
-            "delivery_count": 0,
-            "support_message_shown": 0,
-            "comparison_mode": 1
+            "time": res[0], 
+            "genre": res[1],
+            "delivery_count": res[2],
+            "support_message_shown": res[3]
         }
+    except Exception as e:
+        print(f"❌ get_user_settings error for user {user_id}: {e}")
+        return {"time": "08:00", "genre": "トップ", "delivery_count": 0, "support_message_shown": 0}
 
-def update_user_settings(user_id, delivery_time, genre, comparison_mode=1):
+def update_user_settings(user_id, delivery_time, genre):
     """ユーザー設定を更新"""
     try:
-        all_data = load_user_data()
+        conn, db_type = get_db_connection()
+        c = conn.cursor()
         
-        if user_id not in all_data:
-            all_data[user_id] = {
-                "delivery_time": delivery_time,
-                "genre": genre,
-                "delivery_count": 0,
-                "support_message_shown": 0,
-                "comparison_mode": comparison_mode
-            }
+        if db_type == 'postgres':
+            c.execute('''
+                INSERT INTO users (user_id, delivery_time, genre, delivery_count, support_message_shown) 
+                VALUES (%s, %s, %s, 0, 0)
+                ON CONFLICT(user_id) DO UPDATE SET delivery_time=EXCLUDED.delivery_time, genre=EXCLUDED.genre
+            ''', (user_id, delivery_time, genre))
         else:
-            all_data[user_id]["delivery_time"] = delivery_time
-            all_data[user_id]["genre"] = genre
-            all_data[user_id]["comparison_mode"] = comparison_mode
+            c.execute('''
+                INSERT INTO users (user_id, delivery_time, genre, delivery_count, support_message_shown) 
+                VALUES (?, ?, ?, 0, 0)
+                ON CONFLICT(user_id) DO UPDATE SET delivery_time=excluded.delivery_time, genre=excluded.genre
+            ''', (user_id, delivery_time, genre))
         
-        save_user_data(all_data)
-        print(f"✅ Updated settings for {user_id}")
+        conn.commit()
+        conn.close()
+        print(f"✅ Updated settings for {user_id}: {delivery_time}, {genre}")
     except Exception as e:
-        print(f"❌ update_user_settings error: {e}")
+        print(f"❌ update_user_settings error for user {user_id}: {e}")
 
 def increment_delivery_count(user_id):
     """配信回数をインクリメント"""
     try:
-        all_data = load_user_data()
+        conn, db_type = get_db_connection()
+        c = conn.cursor()
         
-        if user_id in all_data:
-            all_data[user_id]["delivery_count"] = all_data[user_id].get("delivery_count", 0) + 1
-            save_user_data(all_data)
+        placeholder = '%s' if db_type == 'postgres' else '?'
+        c.execute(f'UPDATE users SET delivery_count = delivery_count + 1 WHERE user_id = {placeholder}', (user_id,))
+        
+        conn.commit()
+        conn.close()
+        print(f"✅ Incremented delivery count for {user_id}")
     except Exception as e:
-        print(f"❌ increment_delivery_count error: {e}")
+        print(f"❌ increment_delivery_count error for user {user_id}: {e}")
 
 def mark_support_message_shown(user_id):
-    """サポートメッセージ表示済みフラグを立てる"""
+    """応援メッセージ表示済みフラグを立てる"""
     try:
-        all_data = load_user_data()
+        conn, db_type = get_db_connection()
+        c = conn.cursor()
         
-        if user_id in all_data:
-            all_data[user_id]["support_message_shown"] = 1
-            save_user_data(all_data)
+        placeholder = '%s' if db_type == 'postgres' else '?'
+        c.execute(f'UPDATE users SET support_message_shown = 1 WHERE user_id = {placeholder}', (user_id,))
+        
+        conn.commit()
+        conn.close()
+        print(f"✅ Marked support message as shown for {user_id}")
     except Exception as e:
-        print(f"❌ mark_support_message_shown error: {e}")
+        print(f"❌ mark_support_message_shown error for user {user_id}: {e}")
 
 def get_users_by_time(target_time):
-    """指定時刻に配信予定のユーザーを取得"""
+    """指定した時間に配信すべきユーザーリストを取得"""
     try:
-        all_data = load_user_data()
-        users = []
+        conn, db_type = get_db_connection()
+        c = conn.cursor()
         
-        for user_id, settings in all_data.items():
-            if settings.get("delivery_time") == target_time:
-                users.append((
-                    user_id,
-                    settings.get("genre", "トップ"),
-                    settings.get("comparison_mode", 1)
-                ))
+        placeholder = '%s' if db_type == 'postgres' else '?'
+        c.execute(f'SELECT user_id, genre FROM users WHERE delivery_time = {placeholder}', (target_time,))
+        users = c.fetchall()
         
+        conn.close()
         return users
     except Exception as e:
-        print(f"❌ get_users_by_time error: {e}")
+        print(f"❌ get_users_by_time error for time {target_time}: {e}")
         return []
 
 # ==========================================
-# ニュース取得ロジック（多角的比較用）
+# ニュース取得・AI要約ロジック（検索機能強化版）
 # ==========================================
+def get_news_content(category):
+    if category not in RSS_URL:
+        category = "トップ"
+    
+    feed = feedparser.parse(RSS_URL[category])
+    items = []
+    for entry in feed.entries[:5]:
+        items.append(f"・{entry.title} ({entry.link})")
+    
+    return "\n".join(items)
 
-def fetch_rss_articles(source_name, category):
-    """指定したソースとカテゴリのRSS記事を取得"""
+def search_news_background(news_title):
+    """
+    OpenAIのWeb検索機能を使って、ニュースに関する信頼できる追加情報を取得
+    """
     try:
-        if source_name not in NEWS_SOURCES:
-            return []
-        
-        feed_url = NEWS_SOURCES[source_name].get(category)
-        if not feed_url:
-            return []
-        
-        feed = feedparser.parse(feed_url)
-        articles = []
-        
-        for entry in feed.entries[:10]:
-            articles.append({
-                "title": entry.title,
-                "link": entry.link,
-                "source": source_name,
-                "published": entry.get("published", ""),
-            })
-        
-        return articles
-    except Exception as e:
-        print(f"❌ Error fetching RSS from {source_name}: {e}")
-        return []
-
-def extract_keywords(text):
-    """テキストからキーワードを抽出（簡易版）"""
-    # 日本語の名詞的な単語を抽出（簡易的な実装）
-    words = re.findall(r'[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff]{2,}', text)
-    return [w for w in words if len(w) >= 2]
-
-def find_trending_topics(all_articles):
-    """複数ソースで共通して扱われている話題を特定"""
-    all_keywords = []
-    
-    for article in all_articles:
-        keywords = extract_keywords(article['title'])
-        all_keywords.extend(keywords)
-    
-    # 出現頻度の高いキーワードを特定
-    keyword_counts = Counter(all_keywords)
-    trending_keywords = [kw for kw, count in keyword_counts.most_common(20) if count >= 2]
-    
-    # キーワードを含む記事をグループ化
-    topic_groups = {}
-    
-    for article in all_articles:
-        title = article['title']
-        matched_keywords = [kw for kw in trending_keywords if kw in title]
-        
-        if matched_keywords:
-            key = matched_keywords[0]  # 最初にマッチしたキーワードをトピックキーとする
-            if key not in topic_groups:
-                topic_groups[key] = []
-            topic_groups[key].append(article)
-    
-    # 複数ソースで扱われているトピックのみを返す
-    trending_topics = []
-    for keyword, articles in topic_groups.items():
-        sources = set([a['source'] for a in articles])
-        if len(sources) >= 2:  # 2つ以上のソースで扱われている
-            trending_topics.append({
-                "keyword": keyword,
-                "articles": articles,
-                "source_count": len(sources)
-            })
-    
-    # 話題性の高い順にソート
-    trending_topics.sort(key=lambda x: x['source_count'], reverse=True)
-    
-    return trending_topics[:5]  # 上位5つの話題を返す
-
-def generate_comparison_analysis(article, category):
-    """Yahooの記事を起点に、他メディアの視点をAIが検索・比較分析する"""
-    
-    title = article['title']
-    link = article['link']
-    
-    system_prompt = """あなたは明るく親しみやすいニュース解説AIで、国内外の報道機関の論調に精通したプロのニュースアナリストです。
-提供されたニュースに対し、OpenAIの検索機能や知識を用いて、他の主要メディア（朝日、産経、日経、ロイター、BBC等）が
-この件をどのような切り口で報じているか、あるいは報じる可能性があるかを分析してください。
-読者が「情報の偏り」や「多角的な視点」に気づけるような深い分析を提供してください。"""
-
-    user_prompt = f"""
-以下のYahooニュースについて、他メディアとの比較分析を行ってください。
-
-【元のニュース】: {title}
-【カテゴリー】: {category}
-【URL】: {link}
-
-以下の形式で出力してください。
-
-■ ニュース題名：(内容がパッとわかるタイトル)
-
-【1. このニュースの内容】
-(何が起きているのかを中高生でもわかりやすく解説)
-
-【2. 他メディアとの視点の違い】
-・それぞれのメディア（例：yahoo,NHK,BBCなど）がどのように取り上げているかを分析し、違いをわかりやすく比べる
-・もし海外のメディアも取り上げていたら、それについても分析する
-
-【3. ネット・SNSの反応】
-(Yahooコメント欄やXなどで、どのような賛否両論が起きているか)
-
-【4. 今後の展開予想】
-(今後、どのような展開が予想されるか、読者が注意すべき点は何か)
-"""
-
-    try:
-        # ツール(検索)の使用を想定した最新のGPT-4oモデルを使用
+        # GPT-4o with web searchを使用（検索機能が利用可能なモデル）
         response = client.chat.completions.create(
-            model="gpt-4o-mini", # 検索精度を高めるため4oを推奨
+            model="gpt-4o",  # Web検索が可能なモデル
             messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
+                {
+                    "role": "system", 
+                    "content": "あなたは信頼できるニュース情報を検索・要約する専門家です。与えられたニュースについて、信頼できる情報源から背景情報や詳細を簡潔にまとめてください。"
+                },
+                {
+                    "role": "user", 
+                    "content": f"以下のニュースについて、信頼できる情報源から背景情報や詳細を80文字程度で簡潔にまとめてください：\n\n{news_title}"
+                }
             ],
-            max_tokens=1000,
-            temperature=0.7
+            max_tokens=200,
+            temperature=0.5
         )
         return response.choices[0].message.content.strip()
     except Exception as e:
-        print(f"❌ OpenAI API Error: {e}")
-        return f"【{title}】に関する分析に失敗しました。"
+        print(f"❌ Web search error for '{news_title}': {e}")
+        return None
 
-def get_comparative_news(category):
-    """Yahooからニュースを取得し、一つのニュースを深掘りするメイン処理"""
-    timestamp = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
-    print(f"📊 [{timestamp}] Starting AI deep-analysis for {category} (Yahoo based)")
+def generate_ai_summary(news_entries, category):
+    """
+    ニュース全体をまとめて600文字程度で要約し、各ニュースにWeb検索による追加情報を付与
+    """
+    system_prompt = (
+        "あなたは明るく親しみやすいニュース解説AIです。"
+        "ユーザーに最新情報をわかりやすく伝えてください。"
+    )
     
-    # Yahooから記事を取得
-    articles = fetch_rss_articles("Yahoo", category)
+    # 各ニュースについてWeb検索で追加情報を取得
+    enriched_news = []
+    for i, entry in enumerate(news_entries[:5], 1):
+        title = entry.title
+        link = entry.link
+        
+        print(f"🔍 Searching background info for: {title}")
+        additional_info = search_news_background(title)
+        
+        if additional_info:
+            enriched_news.append(f"{i}. {title}\n追加情報: {additional_info}")
+        else:
+            enriched_news.append(f"{i}. {title}")
     
-    if not articles:
-        return "現在、Yahooニュースを取得できませんでした。"
+    enriched_text = "\n\n".join(enriched_news)
     
-    # 最初の1件（最も注目されている記事）を詳細分析の対象にする
-    target_article = articles[0]
-    
-    print(f"   → Analyzing top article: {target_article['title']}")
-    
-    # AIによる多角的分析の生成
-    analysis = generate_comparison_analysis(target_article, category)
-    
-    final_message = f"📰 【{category}】AI多角的ニュース比較\n\n" + analysis
-    
-    # 元記事へのリンク
-    final_message += f"\n\n{'='*40}\n👇 元のニュース（Yahoo）\n{target_article['title']}\n{target_article['link']}"
-    
-    return final_message
+    user_prompt = f"""
+    以下のニュース記事(ジャンル:{category})を元に、LINEで送るニュースダイジェストを作成してください。
 
-# ==========================================
-# 従来の要約機能（シンプルモード用）
-# ==========================================
+    【条件】
+    1. 全体の文字数は「600文字程度」に収めてください。
+    2. 絵文字を適度に使用し、視覚的に楽しく読みやすくしてください(例: 💡, 📰, ⚡)。
+    3. 冒頭に「お疲れ様です!」など、読む人に寄り添う挨拶を入れてください。
+    4. 各ニュースを番号付きで紹介し、「追加情報」で示された信頼できる情報源の内容を自然に織り交ぜて解説してください。
+    5. 重要なトピックを中心に、流れを作って解説してください。
+    6. 記事のURLは要約内には含めないでください(別途付与します)。
 
-def get_simple_news_summary(category):
-    """従来通りのシンプルな要約"""
+    【ニュース内容】
+    {enriched_text}
+    """
+
     try:
-        articles = fetch_rss_articles("Yahoo", category)
-        
-        if not articles:
-            return "ニュースを取得できませんでした。"
-        
-        articles_text = "\n".join([f"・{a['title']} ({a['link']})" for a in articles[:5]])
-        
-        system_prompt = "あなたは明るく親しみやすいニュース解説AIです。"
-        
-        user_prompt = f"""
-以下のニュース記事(ジャンル:{category})を元に、LINEで送るニュースダイジェストを作成してください。
-
-【条件】
-1. 全体の文字数は「600文字程度」に収めてください。
-2. 絵文字を適度に使用し、視覚的に楽しく読みやすくしてください。
-3. 各記事をバラバラに要約するのではなく、重要なトピックを中心に流れを作って解説してください。
-4. 記事のURLは要約内には含めず、文章のみで構成してください。
-5. 冒頭に「お疲れ様です!」など、読む人に寄り添う挨拶を入れてください。
-6. それぞれのニュースタイトルの前に数字をつけてください。
-
-【ニュース内容】
-{articles_text}
-"""
-
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            max_tokens=800,
+            max_tokens=900,
             temperature=0.7
         )
-        
-        summary = response.choices[0].message.content.strip()
-        
-        links_text = "\n".join([f"🔗 {a['title'][:15]}...\n{a['link']}" for a in articles[:5]])
-        
-        return f"{summary}\n\n👇 気になる記事をチェック\n{links_text}"
-        
+        return response.choices[0].message.content.strip()
     except Exception as e:
-        print(f"❌ Error in get_simple_news_summary: {e}")
-        return "ニュースの取得に失敗しました。"
+        print(f"❌ OpenAI API Error: {e}")
+        return "申し訳ありません。AIによる要約の生成に失敗しました。"
 
-# ==========================================
-# プッシュ配信
-# ==========================================
-
-def push_news(user_id, category, comparison_mode=1):
+def push_news(user_id, category):
+    """指定ユーザーにニュースを送信する処理"""
     timestamp = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
-    # 判定を int() で確実に行う
-    mode = int(comparison_mode)
-    
-    print(f"📤 [{timestamp}] Pushing news to {user_id} (Genre: {category}, Mode: {'Comparison' if mode == 1 else 'Simple'})")
+    print(f"📤 [{timestamp}] Start pushing news to {user_id} (Genre: {category})")
     
     try:
-        if comparison_mode == 1:
-            final_message = get_comparative_news(category)
-        else:
-            final_message = get_simple_news_summary(category)
-        
+        feed = feedparser.parse(RSS_URL.get(category, RSS_URL["トップ"]))
+        if not feed.entries:
+            print(f"⚠️ [{timestamp}] No news entries found for {user_id} in category {category}")
+            return
+
+        # Web検索機能を使った要約生成
+        summary_text = generate_ai_summary(feed.entries, category)
+
+        # リンク一覧を追加
+        links_text = "\n".join([f"🔗 {e.title[:15]}...\n{e.link}" for e in feed.entries[:5]])
+        final_message = f"{summary_text}\n\n👇 気になる記事をチェック\n{links_text}"
+
         line_bot_api.push_message(user_id, TextSendMessage(text=final_message))
         print(f"✅ [{timestamp}] Successfully sent news to {user_id}")
         
@@ -433,81 +339,101 @@ def push_news(user_id, category, comparison_mode=1):
                 f"↓応援はこちらから\n{BOOTH_SUPPORT_URL}"
             )
             
-            time.sleep(2)
-            line_bot_api.push_message(user_id, TextSendMessage(text=support_message))
-            mark_support_message_shown(user_id)
-            print(f"💝 [{timestamp}] Support message sent to {user_id}")
+            try:
+                time.sleep(2)
+                line_bot_api.push_message(user_id, TextSendMessage(text=support_message))
+                mark_support_message_shown(user_id)
+                print(f"💝 [{timestamp}] Support message sent to {user_id}")
+            except Exception as e:
+                print(f"❌ [{timestamp}] Failed to send support message to {user_id}: {e}")
         
     except Exception as e:
         print(f"❌ [{timestamp}] Push Error for {user_id}: {e}")
 
 # ==========================================
-# スケジューラー
+# スケジューラー（改善版）
 # ==========================================
-
-# スケジューラーの修正
 def schedule_checker():
+    """毎分00秒に正確に実行"""
     print("🚀 Scheduler thread started")
-    last_sent_minute = ""  # 最後に送信した「分」を保持
-
+    
+    # 起動時に次の分まで待機
+    now = datetime.now(JST)
+    wait_seconds = 60 - now.second
+    print(f"⏱️ Waiting {wait_seconds}s to sync with minute boundary...")
+    time.sleep(wait_seconds)
+    
+    last_checked_minute = None
+    
     while True:
         try:
             now_jst = datetime.now(JST)
             current_time_str = now_jst.strftime("%H:%M")
             current_minute_key = now_jst.strftime("%Y%m%d%H%M")
+            timestamp = now_jst.strftime("%Y-%m-%d %H:%M:%S")
             
-            # 同じ分には一度しか処理しない
-            if current_minute_key != last_sent_minute:
-                targets = get_users_by_time(current_time_str)
-                
-                if targets:
-                    print(f"📬 [{now_jst}] Found {len(targets)} user(s) for {current_time_str}")
-                    for user_id, genre, comparison_mode in targets:
-                        # 配信処理
-                        push_news(user_id, genre, comparison_mode)
-                    
-                    # 送信完了した分を記録
-                    last_sent_minute = current_minute_key
+            # 同じ分に複数回実行しないようにチェック
+            if current_minute_key == last_checked_minute:
+                time.sleep(1)  # 短いスリープで次のループへ
+                continue
             
-            # 次のチェックまで少し待機（1秒おきにチェックすれば十分）
-            time.sleep(10) 
+            last_checked_minute = current_minute_key
+            
+            print(f"⏰ [{timestamp}] Checking scheduled deliveries for {current_time_str}...")
+            
+            targets = get_users_by_time(current_time_str)
+            
+            if targets:
+                print(f"📬 [{timestamp}] Found {len(targets)} user(s) to deliver")
+                for user_id, genre in targets:
+                    print(f"   → User: {user_id}, Genre: {genre}")
+                    threading.Thread(target=push_news, args=(user_id, genre), daemon=True).start()
+            else:
+                print(f"   No deliveries scheduled for {current_time_str}")
+            
+            # 次の分の00秒まで待機
+            now = datetime.now(JST)
+            wait_seconds = 60 - now.second
+            time.sleep(wait_seconds)
             
         except Exception as e:
-            print(f"❌ Scheduler error: {e}")
-            time.sleep(30)
+            error_time = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
+            print(f"❌ [{error_time}] Scheduler error: {e}")
+            time.sleep(60)
 
 # ==========================================
-# Flask Routes
+# Flask Webルート
 # ==========================================
-
 @app.route("/")
 def health_check():
-    return "OK - Multi-Perspective News Bot (JSON Storage)"
+    return "OK"
 
 @app.route("/settings", methods=['GET', 'POST'])
 def settings():
     user_id = request.args.get('user_id')
+    timestamp = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
     
     if not user_id:
-        return "エラー: ユーザーIDが見つかりません。"
+        print(f"⚠️ [{timestamp}] Settings page accessed without user_id")
+        return "エラー: ユーザーIDが見つかりません。LINEから再度アクセスしてください。"
 
     if request.method == 'POST':
         new_time = request.form.get('delivery_time')
         new_genre = request.form.get('genre')
-        new_mode = int(request.form.get('comparison_mode', 1))
         
-        update_user_settings(user_id, new_time, new_genre, new_mode)
+        print(f"⚙️ [{timestamp}] Settings update requested by {user_id}: time={new_time}, genre={new_genre}")
+        update_user_settings(user_id, new_time, new_genre)
         
         return """
         <div style="text-align:center; padding: 20px; font-family: sans-serif;">
             <h2>✅ 設定を保存しました!</h2>
+            <p>設定した時間にニュースが届きます。</p>
             <p>LINEの画面に戻ってください。</p>
         </div>
         """
 
     current_settings = get_user_settings(user_id)
-    
-    genre_options = ['トップ', '社会', '国際', '経済', 'スポーツ', 'エンタメ', 'IT']
+    print(f"📖 [{timestamp}] Settings page accessed by {user_id}")
     
     html = f"""
     <!DOCTYPE html>
@@ -517,14 +443,12 @@ def settings():
         <title>ニュース配信設定</title>
         <style>
             body {{ font-family: sans-serif; padding: 20px; background-color: #f0f0f0; }}
-            .container {{ max-width: 400px; margin: 0 auto; background: white; padding: 20px; border-radius: 8px; }}
+            .container {{ max-width: 400px; margin: 0 auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }}
             h2 {{ text-align: center; color: #333; }}
             label {{ display: block; margin-top: 15px; font-weight: bold; }}
             select, input[type="time"] {{ width: 100%; padding: 10px; margin-top: 5px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; }}
-            .mode-option {{ margin: 10px 0; padding: 10px; border: 2px solid #ddd; border-radius: 4px; cursor: pointer; }}
-            .mode-option input {{ margin-right: 10px; }}
-            .mode-option.selected {{ border-color: #00B900; background-color: #f0fff0; }}
             button {{ width: 100%; padding: 12px; background-color: #00B900; color: white; border: none; border-radius: 4px; margin-top: 20px; font-size: 16px; cursor: pointer; }}
+            button:hover {{ background-color: #009900; }}
         </style>
     </head>
     <body>
@@ -532,24 +456,12 @@ def settings():
             <h2>⚙️ 配信設定</h2>
             <form method="POST">
                 <label>配信時間:</label>
-                <input type="time" name="delivery_time" value="{current_settings['delivery_time']}" required>
+                <input type="time" name="delivery_time" value="{current_settings['time']}" required>
                 
                 <label>ニュースジャンル:</label>
                 <select name="genre">
-                    {''.join([f'<option value="{k}" {"selected" if k == current_settings["genre"] else ""}>{k}</option>' for k in genre_options])}
+                    {''.join([f'<option value="{k}" {"selected" if k == current_settings["genre"] else ""}>{k}</option>' for k in RSS_URL.keys()])}
                 </select>
-                
-                <label>配信モード:</label>
-                <div class="mode-option {'selected' if current_settings.get('comparison_mode', 1) == 1 else ''}">
-                    <input type="radio" name="comparison_mode" value="1" {'checked' if current_settings.get('comparison_mode', 1) == 1 else ''}>
-                    <strong>📊 多角的比較モード</strong><br>
-                    <small>複数メディアの視点を比較</small>
-                </div>
-                <div class="mode-option {'selected' if current_settings.get('comparison_mode', 1) == 0 else ''}">
-                    <input type="radio" name="comparison_mode" value="0" {'checked' if current_settings.get('comparison_mode', 1) == 0 else ''}>
-                    <strong>📰 シンプルモード</strong><br>
-                    <small>従来通りの要約</small>
-                </div>
                 
                 <button type="submit">設定を保存</button>
             </form>
@@ -559,6 +471,9 @@ def settings():
     """
     return render_template_string(html)
 
+# ==========================================
+# LINE Webhook
+# ==========================================
 @app.route("/callback", methods=['POST'])
 def callback():
     signature = request.headers.get("X-Line-Signature")
@@ -567,6 +482,8 @@ def callback():
     try:
         web_hook_handler.handle(body, signature)
     except InvalidSignatureError:
+        timestamp = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
+        print(f"❌ [{timestamp}] Invalid signature received")
         abort(400)
 
     return "OK"
@@ -577,54 +494,44 @@ def handle_message(event):
     msg = event.message.text.strip()
     timestamp = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
     
-    print(f"💬 [{timestamp}] Message from {user_id}: '{msg}'")
+    print(f"💬 [{timestamp}] Message received from {user_id}: '{msg}'")
 
     if msg == "今すぐ":
         settings = get_user_settings(user_id)
-        threading.Thread(
-            target=push_news, 
-            args=(user_id, settings['genre'], settings.get('comparison_mode', 1)), 
-            daemon=True
-        ).start()
-        line_bot_api.reply_message(
-            event.reply_token, 
-        )
+        print(f"🚀 [{timestamp}] Immediate delivery requested by {user_id}")
+        threading.Thread(target=push_news, args=(user_id, settings['genre']), daemon=True).start()
+        line_bot_api.reply_message(event.reply_token, TextSendMessage("📰 ニュースを取得中です...少々お待ちください！"))
         return
 
     if msg == "設定変更":
         settings_url = f"{APP_PUBLIC_URL}/settings?user_id={user_id}"
+        
         reply_text = (
-            "⚙️ 設定変更\n\n"
-            "📊 新機能：多角的ニュース比較モード\n"
-            "複数メディアの報道を比較できます！\n\n"
+            "⚙️ 設定変更\n"
+            "以下のリンクから配達時間とジャンルを変更できます。\n\n"
             f"{settings_url}\n\n"
-            "※他人に教えないでください。"
+            "※リンクを知っている人は誰でも設定を変更できてしまうため、他人に教えないでください。"
         )
         line_bot_api.reply_message(event.reply_token, TextSendMessage(reply_text))
+        print(f"⚙️ [{timestamp}] Settings link sent to {user_id}")
         return
 
     line_bot_api.reply_message(
         event.reply_token,
-        TextSendMessage(
-            "💡メニュー\n"
-            "・「今すぐ」: 今すぐニュースを受信\n"
-            "・「設定変更」: 時間・ジャンル・モードを変更\n\n"
-            "📊 新機能！\n"
-            "多角的比較モードで複数メディアの視点を比較できます"
-        )
+        TextSendMessage("💡メニュー\n・「今すぐ」: 今すぐニュースを受信\n・「設定変更」: 時間やジャンルを変更")
     )
+    print(f"ℹ️ [{timestamp}] Help menu sent to {user_id}")
 
 # ==========================================
-# アプリ起動
+# アプリ起動時の初期化
 # ==========================================
-init_data_storage()
+init_db()
 
 scheduler_thread = threading.Thread(target=schedule_checker, daemon=True)
 scheduler_thread.start()
 
 startup_time = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
-print(f"✅ [{startup_time}] Multi-Perspective News Bot started (JSON Storage)")
+print(f"✅ [{startup_time}] VisAI LINE Bot started successfully")
 
 if __name__ == "__main__":
-    # debug=True はローカル開発時のみ。本番(Render等)では必ず False に。
-    app.run(debug=False, host='0.0.0.0', port=10000)
+    app.run(debug=True, host='0.0.0.0', port=10000)
