@@ -231,7 +231,7 @@ def search_news_background(news_title):
     try:
         # GPT-4o with web searchを使用（検索機能が利用可能なモデル）
         response = client.chat.completions.create(
-            model="gpt-4o",  # Web検索が可能なモデル
+            model="gpt-4o-mini",  # Web検索が可能なモデル
             messages=[
                 {
                     "role": "system", 
