@@ -311,7 +311,7 @@ def generate_comparison_analysis(article, category):
     try:
         # ツール(検索)の使用を想定した最新のGPT-4oモデルを使用
         response = client.chat.completions.create(
-            model="gpt-4o", # 検索精度を高めるため4oを推奨
+            model="gpt-4o-mini", # 検索精度を高めるため4oを推奨
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
@@ -600,7 +600,6 @@ def handle_message(event):
         ).start()
         line_bot_api.reply_message(
             event.reply_token, 
-            TextSendMessage("📰 ニュースを分析中です...少々お待ちください！")
         )
         return
 
