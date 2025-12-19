@@ -1,5 +1,5 @@
 import os
-import sqlite3
+import json
 import threading
 import time
 import feedparser
@@ -10,6 +10,7 @@ from flask import Flask, request, abort, render_template_string
 from bs4 import BeautifulSoup
 from collections import Counter
 import re
+from pathlib import Path
 
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
@@ -29,8 +30,6 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 APP_PUBLIC_URL = os.environ.get("APP_PUBLIC_URL", "https://visai-1.onrender.com")
 BOOTH_SUPPORT_URL = "https://visai.booth.pm/items/7763380"
 
-DATABASE_URL = os.environ.get("DATABASE_URL")
-
 if not all([LINE_CHANNEL_ACCESS_TOKEN, LINE_CHANNEL_SECRET, OPENAI_API_KEY]):
     print("🚨 必要な環境変数が設定されていません。")
 
@@ -38,8 +37,14 @@ line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 web_hook_handler = WebhookHandler(LINE_CHANNEL_SECRET)
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "user_settings.db")
+# JSONファイルのパス
+DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
+USER_DATA_FILE = os.path.join(DATA_DIR, "user_settings.json")
+
 JST = timezone('Asia/Tokyo')
+
+# ファイルロック用
+data_lock = threading.Lock()
 
 # ==========================================
 # 多角的ニュース比較用のRSSフィード設定
@@ -69,149 +74,132 @@ NEWS_SOURCES = {
 ADDITIONAL_SOURCES = ["朝日新聞", "産経ニュース", "ITmedia", "日経新聞", "Reuters", "BBC"]
 
 # ==========================================
-# データベース接続管理
+# JSONベースのデータ管理
 # ==========================================
-def get_db_connection():
-    if DATABASE_URL:
-        import psycopg2
-        from urllib.parse import urlparse
-        result = urlparse(DATABASE_URL)
-        conn = psycopg2.connect(
-            dbname=result.path[1:],
-            user=result.username,
-            password=result.password,
-            host=result.hostname,
-            port=result.port
-        )
-        return conn, 'postgres'
-    else:
-        conn = sqlite3.connect(DB_PATH)
-        return conn, 'sqlite'
 
-def init_db():
+def init_data_storage():
+    """データ保存用ディレクトリとファイルを初期化"""
     try:
-        conn, db_type = get_db_connection()
-        c = conn.cursor()
+        # ディレクトリ作成
+        Path(DATA_DIR).mkdir(parents=True, exist_ok=True)
         
-        if db_type == 'postgres':
-            c.execute('''
-                CREATE TABLE IF NOT EXISTS users (
-                    user_id TEXT PRIMARY KEY,
-                    delivery_time TEXT DEFAULT '08:00',
-                    genre TEXT DEFAULT 'トップ',
-                    delivery_count INTEGER DEFAULT 0,
-                    support_message_shown INTEGER DEFAULT 0,
-                    comparison_mode INTEGER DEFAULT 1
-                )
-            ''')
+        # ファイルが存在しない場合は空のJSONを作成
+        if not os.path.exists(USER_DATA_FILE):
+            with open(USER_DATA_FILE, 'w', encoding='utf-8') as f:
+                json.dump({}, f, ensure_ascii=False, indent=2)
+            print("✅ JSON data storage initialized")
         else:
-            c.execute('''
-                CREATE TABLE IF NOT EXISTS users (
-                    user_id TEXT PRIMARY KEY,
-                    delivery_time TEXT DEFAULT '08:00',
-                    genre TEXT DEFAULT 'トップ',
-                    delivery_count INTEGER DEFAULT 0,
-                    support_message_shown INTEGER DEFAULT 0,
-                    comparison_mode INTEGER DEFAULT 1
-                )
-            ''')
-        
-        conn.commit()
-        conn.close()
-        print(f"✅ Database initialized ({db_type})")
+            print("✅ JSON data storage found")
     except Exception as e:
-        print(f"❌ Database initialization error: {e}")
+        print(f"❌ Data storage initialization error: {e}")
+
+def load_user_data():
+    """ユーザーデータをJSONファイルから読み込み"""
+    try:
+        with data_lock:
+            if os.path.exists(USER_DATA_FILE):
+                with open(USER_DATA_FILE, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            return {}
+    except Exception as e:
+        print(f"❌ Error loading user data: {e}")
+        return {}
+
+def save_user_data(data):
+    """ユーザーデータをJSONファイルに保存"""
+    try:
+        with data_lock:
+            with open(USER_DATA_FILE, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"❌ Error saving user data: {e}")
 
 def get_user_settings(user_id):
+    """ユーザーの設定を取得"""
     try:
-        conn, db_type = get_db_connection()
-        c = conn.cursor()
-        placeholder = '%s' if db_type == 'postgres' else '?'
-        c.execute(f'SELECT delivery_time, genre, delivery_count, support_message_shown, comparison_mode FROM users WHERE user_id = {placeholder}', (user_id,))
-        res = c.fetchone()
+        all_data = load_user_data()
         
-        if res is None:
-            if db_type == 'postgres':
-                c.execute('INSERT INTO users (user_id, delivery_time, genre, delivery_count, support_message_shown, comparison_mode) VALUES (%s, %s, %s, %s, %s, %s)', 
-                         (user_id, '08:00', 'トップ', 0, 0, 1))
-            else:
-                c.execute('INSERT INTO users (user_id, delivery_time, genre, delivery_count, support_message_shown, comparison_mode) VALUES (?, ?, ?, ?, ?, ?)', 
-                         (user_id, '08:00', 'トップ', 0, 0, 1))
-            conn.commit()
-            res = ('08:00', 'トップ', 0, 0, 1)
+        if user_id not in all_data:
+            # デフォルト設定で新規ユーザーを作成
+            all_data[user_id] = {
+                "delivery_time": "08:00",
+                "genre": "トップ",
+                "delivery_count": 0,
+                "support_message_shown": 0,
+                "comparison_mode": 1
+            }
+            save_user_data(all_data)
         
-        conn.close()
-        return {
-            "time": res[0], 
-            "genre": res[1],
-            "delivery_count": res[2],
-            "support_message_shown": res[3],
-            "comparison_mode": res[4] if len(res) > 4 else 1
-        }
+        return all_data[user_id]
     except Exception as e:
         print(f"❌ get_user_settings error: {e}")
-        return {"time": "08:00", "genre": "トップ", "delivery_count": 0, "support_message_shown": 0, "comparison_mode": 1}
+        return {
+            "delivery_time": "08:00",
+            "genre": "トップ",
+            "delivery_count": 0,
+            "support_message_shown": 0,
+            "comparison_mode": 1
+        }
 
 def update_user_settings(user_id, delivery_time, genre, comparison_mode=1):
+    """ユーザー設定を更新"""
     try:
-        conn, db_type = get_db_connection()
-        c = conn.cursor()
+        all_data = load_user_data()
         
-        if db_type == 'postgres':
-            c.execute('''
-                INSERT INTO users (user_id, delivery_time, genre, delivery_count, support_message_shown, comparison_mode) 
-                VALUES (%s, %s, %s, 0, 0, %s)
-                ON CONFLICT(user_id) DO UPDATE SET 
-                    delivery_time=EXCLUDED.delivery_time, 
-                    genre=EXCLUDED.genre,
-                    comparison_mode=EXCLUDED.comparison_mode
-            ''', (user_id, delivery_time, genre, comparison_mode))
+        if user_id not in all_data:
+            all_data[user_id] = {
+                "delivery_time": delivery_time,
+                "genre": genre,
+                "delivery_count": 0,
+                "support_message_shown": 0,
+                "comparison_mode": comparison_mode
+            }
         else:
-            c.execute('''
-                INSERT INTO users (user_id, delivery_time, genre, delivery_count, support_message_shown, comparison_mode) 
-                VALUES (?, ?, ?, 0, 0, ?)
-                ON CONFLICT(user_id) DO UPDATE SET 
-                    delivery_time=excluded.delivery_time, 
-                    genre=excluded.genre,
-                    comparison_mode=excluded.comparison_mode
-            ''', (user_id, delivery_time, genre, comparison_mode))
+            all_data[user_id]["delivery_time"] = delivery_time
+            all_data[user_id]["genre"] = genre
+            all_data[user_id]["comparison_mode"] = comparison_mode
         
-        conn.commit()
-        conn.close()
+        save_user_data(all_data)
         print(f"✅ Updated settings for {user_id}")
     except Exception as e:
         print(f"❌ update_user_settings error: {e}")
 
 def increment_delivery_count(user_id):
+    """配信回数をインクリメント"""
     try:
-        conn, db_type = get_db_connection()
-        c = conn.cursor()
-        placeholder = '%s' if db_type == 'postgres' else '?'
-        c.execute(f'UPDATE users SET delivery_count = delivery_count + 1 WHERE user_id = {placeholder}', (user_id,))
-        conn.commit()
-        conn.close()
+        all_data = load_user_data()
+        
+        if user_id in all_data:
+            all_data[user_id]["delivery_count"] = all_data[user_id].get("delivery_count", 0) + 1
+            save_user_data(all_data)
     except Exception as e:
         print(f"❌ increment_delivery_count error: {e}")
 
 def mark_support_message_shown(user_id):
+    """サポートメッセージ表示済みフラグを立てる"""
     try:
-        conn, db_type = get_db_connection()
-        c = conn.cursor()
-        placeholder = '%s' if db_type == 'postgres' else '?'
-        c.execute(f'UPDATE users SET support_message_shown = 1 WHERE user_id = {placeholder}', (user_id,))
-        conn.commit()
-        conn.close()
+        all_data = load_user_data()
+        
+        if user_id in all_data:
+            all_data[user_id]["support_message_shown"] = 1
+            save_user_data(all_data)
     except Exception as e:
         print(f"❌ mark_support_message_shown error: {e}")
 
 def get_users_by_time(target_time):
+    """指定時刻に配信予定のユーザーを取得"""
     try:
-        conn, db_type = get_db_connection()
-        c = conn.cursor()
-        placeholder = '%s' if db_type == 'postgres' else '?'
-        c.execute(f'SELECT user_id, genre, comparison_mode FROM users WHERE delivery_time = {placeholder}', (target_time,))
-        users = c.fetchall()
-        conn.close()
+        all_data = load_user_data()
+        users = []
+        
+        for user_id, settings in all_data.items():
+            if settings.get("delivery_time") == target_time:
+                users.append((
+                    user_id,
+                    settings.get("genre", "トップ"),
+                    settings.get("comparison_mode", 1)
+                ))
+        
         return users
     except Exception as e:
         print(f"❌ get_users_by_time error: {e}")
@@ -567,7 +555,7 @@ def schedule_checker():
 
 @app.route("/")
 def health_check():
-    return "OK - Multi-Perspective News Bot"
+    return "OK - Multi-Perspective News Bot (JSON Storage)"
 
 @app.route("/settings", methods=['GET', 'POST'])
 def settings():
@@ -617,7 +605,7 @@ def settings():
             <h2>⚙️ 配信設定</h2>
             <form method="POST">
                 <label>配信時間:</label>
-                <input type="time" name="delivery_time" value="{current_settings['time']}" required>
+                <input type="time" name="delivery_time" value="{current_settings['delivery_time']}" required>
                 
                 <label>ニュースジャンル:</label>
                 <select name="genre">
@@ -703,13 +691,13 @@ def handle_message(event):
 # ==========================================
 # アプリ起動
 # ==========================================
-init_db()
+init_data_storage()
 
 scheduler_thread = threading.Thread(target=schedule_checker, daemon=True)
 scheduler_thread.start()
 
 startup_time = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
-print(f"✅ [{startup_time}] Multi-Perspective News Bot started")
+print(f"✅ [{startup_time}] Multi-Perspective News Bot started (JSON Storage)")
 
 if __name__ == "__main__":
     app.run(debug=True, host='0.0.0.0', port=10000)
