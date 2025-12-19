@@ -22,7 +22,7 @@ LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 
-APP_PUBLIC_URL = os.environ.get("APP_PUBLIC_URL", "https://visai-1.onrender.com")
+APP_PUBLIC_URL = os.environ.get("APP_PUBLIC_URL", "https://visai.onrender.com")
 BOOTH_SUPPORT_URL = "https://visai.booth.pm/items/7763380"
 
 # 🔧 PostgreSQL接続情報（Renderの永続DB用）
@@ -500,7 +500,6 @@ def handle_message(event):
         settings = get_user_settings(user_id)
         print(f"🚀 [{timestamp}] Immediate delivery requested by {user_id}")
         threading.Thread(target=push_news, args=(user_id, settings['genre']), daemon=True).start()
-        line_bot_api.reply_message(event.reply_token, TextSendMessage("📰 ニュースを取得中です...少々お待ちください！"))
         return
 
     if msg == "設定変更":
