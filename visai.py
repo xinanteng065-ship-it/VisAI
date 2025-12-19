@@ -22,7 +22,7 @@ LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 
-APP_PUBLIC_URL = os.environ.get("APP_PUBLIC_URL", "https://visai.onrender.com")
+APP_PUBLIC_URL = os.environ.get("APP_PUBLIC_URL", "https://visai-1.onrender.com")
 BOOTH_SUPPORT_URL = "https://visai.booth.pm/items/7763380"
 
 # 🔧 PostgreSQL接続情報（Renderの永続DB用）
@@ -211,7 +211,7 @@ def get_users_by_time(target_time):
         return []
 
 # ==========================================
-# ニュース取得・AI要約ロジック（検索機能強化版）
+# ニュース取得・AI要約ロジック
 # ==========================================
 def get_news_content(category):
     if category not in RSS_URL:
@@ -224,56 +224,12 @@ def get_news_content(category):
     
     return "\n".join(items)
 
-def search_news_background(news_title):
-    """
-    OpenAIのWeb検索機能を使って、ニュースに関する信頼できる追加情報を取得
-    """
-    try:
-        # GPT-4o with web searchを使用（検索機能が利用可能なモデル）
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",  # Web検索が可能なモデル
-            messages=[
-                {
-                    "role": "system", 
-                    "content": "あなたは信頼できるニュース情報を検索・要約する専門家です。与えられたニュースについて、信頼できる情報源から背景情報や詳細を簡潔にまとめてください。"
-                },
-                {
-                    "role": "user", 
-                    "content": f"以下のニュースについて、信頼できる情報源から背景情報や詳細を80文字程度で簡潔にまとめてください：\n\n{news_title}"
-                }
-            ],
-            max_tokens=200,
-            temperature=0.5
-        )
-        return response.choices[0].message.content.strip()
-    except Exception as e:
-        print(f"❌ Web search error for '{news_title}': {e}")
-        return None
-
-def generate_ai_summary(news_entries, category):
-    """
-    ニュース全体をまとめて600文字程度で要約し、各ニュースにWeb検索による追加情報を付与
-    """
+def generate_ai_summary(news_text, category):
+    """ニュース全体をまとめて600文字程度で要約する"""
     system_prompt = (
         "あなたは明るく親しみやすいニュース解説AIです。"
         "ユーザーに最新情報をわかりやすく伝えてください。"
     )
-    
-    # 各ニュースについてWeb検索で追加情報を取得
-    enriched_news = []
-    for i, entry in enumerate(news_entries[:5], 1):
-        title = entry.title
-        link = entry.link
-        
-        print(f"🔍 Searching background info for: {title}")
-        additional_info = search_news_background(title)
-        
-        if additional_info:
-            enriched_news.append(f"{i}. {title}\n追加情報: {additional_info}")
-        else:
-            enriched_news.append(f"{i}. {title}")
-    
-    enriched_text = "\n\n".join(enriched_news)
     
     user_prompt = f"""
     以下のニュース記事(ジャンル:{category})を元に、LINEで送るニュースダイジェストを作成してください。
@@ -281,13 +237,13 @@ def generate_ai_summary(news_entries, category):
     【条件】
     1. 全体の文字数は「600文字程度」に収めてください。
     2. 絵文字を適度に使用し、視覚的に楽しく読みやすくしてください(例: 💡, 📰, ⚡)。
-    3. 冒頭に「お疲れ様です!」など、読む人に寄り添う挨拶を入れてください。
-    4. 各ニュースを番号付きで紹介し、「追加情報」で示された信頼できる情報源の内容を自然に織り交ぜて解説してください。
-    5. 重要なトピックを中心に、流れを作って解説してください。
-    6. 記事のURLは要約内には含めないでください(別途付与します)。
+    3. 各記事をバラバラに要約するのではなく、重要なトピックを中心に流れを作って解説してください。
+    4. 記事のURLは要約内には含めず、文章のみで構成してください(URLは別途付与するため)。
+    5. 冒頭に「お疲れ様です!」など、読む人に寄り添う挨拶を入れてください。
+    6. それぞれのニュースタイトルの前に数字をつけてください。その後にニュースを解説してほしいです。
 
     【ニュース内容】
-    {enriched_text}
+    {news_text}
     """
 
     try:
@@ -297,7 +253,7 @@ def generate_ai_summary(news_entries, category):
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            max_tokens=900,
+            max_tokens=800,
             temperature=0.7
         )
         return response.choices[0].message.content.strip()
@@ -316,10 +272,13 @@ def push_news(user_id, category):
             print(f"⚠️ [{timestamp}] No news entries found for {user_id} in category {category}")
             return
 
-        # Web検索機能を使った要約生成
-        summary_text = generate_ai_summary(feed.entries, category)
+        articles_for_ai = []
+        for entry in feed.entries[:5]:
+            articles_for_ai.append(f"タイトル: {entry.title}\nリンク: {entry.link}")
+        input_text = "\n\n".join(articles_for_ai)
 
-        # リンク一覧を追加
+        summary_text = generate_ai_summary(input_text, category)
+
         links_text = "\n".join([f"🔗 {e.title[:15]}...\n{e.link}" for e in feed.entries[:5]])
         final_message = f"{summary_text}\n\n👇 気になる記事をチェック\n{links_text}"
 
@@ -500,6 +459,7 @@ def handle_message(event):
         settings = get_user_settings(user_id)
         print(f"🚀 [{timestamp}] Immediate delivery requested by {user_id}")
         threading.Thread(target=push_news, args=(user_id, settings['genre']), daemon=True).start()
+        line_bot_api.reply_message(event.reply_token, TextSendMessage("📰 ニュースを取得中です...少々お待ちください！"))
         return
 
     if msg == "設定変更":
