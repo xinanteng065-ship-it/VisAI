@@ -277,7 +277,7 @@ def generate_comparison_analysis(article, category):
     title = article['title']
     link = article['link']
     
-    system_prompt = """あなたは国内外の報道機関の論調に精通したプロのニュースアナリストです。
+    system_prompt = """あなたは明るく親しみやすいニュース解説AIで、国内外の報道機関の論調に精通したプロのニュースアナリストです。
 提供されたニュースに対し、OpenAIの検索機能や知識を用いて、他の主要メディア（朝日、産経、日経、ロイター、BBC等）が
 この件をどのような切り口で報じているか、あるいは報じる可能性があるかを分析してください。
 読者が「情報の偏り」や「多角的な視点」に気づけるような深い分析を提供してください。"""
@@ -293,18 +293,17 @@ def generate_comparison_analysis(article, category):
 
 ■ ニュース題名：(内容がパッとわかるタイトル)
 
-【1. このニュースの核心】
-(何が起きているのか、なぜ重要なのかを3行程度で解説)
+【1. このニュースの内容】
+(何が起きているのかを中高生でもわかりやすく解説)
 
 【2. 他メディアとの視点の違い】
-・(リベラル寄りメディア/保守寄りメディアでの扱いの差)
-・(経済紙や専門紙が注目している独自のポイント)
-・(もし海外に関連する場合、海外メディアの冷めた視点や独自の指摘)
+・それぞれのメディア（例：yahoo,NHK,BBCなど）がどのように取り上げているかを分析し、違いをわかりやすく比べる
+・もし海外のメディアも取り上げていたら、それについても分析する
 
 【3. ネット・SNSの反応】
 (Yahooコメント欄やXなどで、どのような賛否両論が起きているか)
 
-【4. このニュースの「裏側」を読む】
+【4. 今後の展開予想】
 (今後、どのような展開が予想されるか、読者が注意すべき点は何か)
 """
 
@@ -406,9 +405,11 @@ def get_simple_news_summary(category):
 # ==========================================
 
 def push_news(user_id, category, comparison_mode=1):
-    """ニュースをプッシュ配信"""
     timestamp = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
-    print(f"📤 [{timestamp}] Pushing news to {user_id} (Genre: {category}, Mode: {'Comparison' if comparison_mode else 'Simple'})")
+    # 判定を int() で確実に行う
+    mode = int(comparison_mode)
+    
+    print(f"📤 [{timestamp}] Pushing news to {user_id} (Genre: {category}, Mode: {'Comparison' if mode == 1 else 'Simple'})")
     
     try:
         if comparison_mode == 1:
@@ -444,49 +445,36 @@ def push_news(user_id, category, comparison_mode=1):
 # スケジューラー
 # ==========================================
 
+# スケジューラーの修正
 def schedule_checker():
     print("🚀 Scheduler thread started")
-    
-    now = datetime.now(JST)
-    wait_seconds = 60 - now.second
-    print(f"⏱️ Waiting {wait_seconds}s to sync...")
-    time.sleep(wait_seconds)
-    
-    last_checked_minute = None
-    
+    last_sent_minute = ""  # 最後に送信した「分」を保持
+
     while True:
         try:
             now_jst = datetime.now(JST)
             current_time_str = now_jst.strftime("%H:%M")
             current_minute_key = now_jst.strftime("%Y%m%d%H%M")
-            timestamp = now_jst.strftime("%Y-%m-%d %H:%M:%S")
             
-            if current_minute_key == last_checked_minute:
-                time.sleep(1)
-                continue
+            # 同じ分には一度しか処理しない
+            if current_minute_key != last_sent_minute:
+                targets = get_users_by_time(current_time_str)
+                
+                if targets:
+                    print(f"📬 [{now_jst}] Found {len(targets)} user(s) for {current_time_str}")
+                    for user_id, genre, comparison_mode in targets:
+                        # 配信処理
+                        push_news(user_id, genre, comparison_mode)
+                    
+                    # 送信完了した分を記録
+                    last_sent_minute = current_minute_key
             
-            last_checked_minute = current_minute_key
-            
-            print(f"⏰ [{timestamp}] Checking deliveries for {current_time_str}...")
-            
-            targets = get_users_by_time(current_time_str)
-            
-            if targets:
-                print(f"📬 [{timestamp}] Found {len(targets)} user(s)")
-                for user_id, genre, comparison_mode in targets:
-                    threading.Thread(
-                        target=push_news, 
-                        args=(user_id, genre, comparison_mode), 
-                        daemon=True
-                    ).start()
-            
-            now = datetime.now(JST)
-            wait_seconds = 60 - now.second
-            time.sleep(wait_seconds)
+            # 次のチェックまで少し待機（1秒おきにチェックすれば十分）
+            time.sleep(10) 
             
         except Exception as e:
             print(f"❌ Scheduler error: {e}")
-            time.sleep(60)
+            time.sleep(30)
 
 # ==========================================
 # Flask Routes
@@ -638,4 +626,5 @@ startup_time = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
 print(f"✅ [{startup_time}] Multi-Perspective News Bot started (JSON Storage)")
 
 if __name__ == "__main__":
-    app.run(debug=True, host='0.0.0.0', port=10000)
+    # debug=True はローカル開発時のみ。本番(Render等)では必ず False に。
+    app.run(debug=False, host='0.0.0.0', port=10000)
