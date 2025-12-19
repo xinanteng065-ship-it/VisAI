@@ -66,8 +66,54 @@ NEWS_SOURCES = {
         "国際": "https://www.nhk.or.jp/rss/news/cat6.xml",
         "経済": "https://www.nhk.or.jp/rss/news/cat5.xml",
         "スポーツ": "https://www.nhk.or.jp/rss/news/cat7.xml",
-        "IT": "https://www.nhk.or.jp/rss/news/cat5.xml",
+        "エンタメ": "https://www.nhk.or.jp/rss/news/cat0.xml", # エンタメ単独がないためトップで代用
+        "IT": "https://www.nhk.or.jp/rss/news/cat3.xml", # 科学・文化
     },
+    "読売新聞 (国内最大)": { # 新規追加1
+        "トップ": "https://www.yomiuri.co.jp/rss/yol/topnews.xml",
+        "社会": "https://www.yomiuri.co.jp/rss/yol/national.xml",
+        "国際": "https://www.yomiuri.co.jp/rss/yol/world.xml",
+        "経済": "https://www.yomiuri.co.jp/rss/yol/economy.xml",
+        "スポーツ": "https://www.yomiuri.co.jp/rss/yol/sports.xml",
+        "エンタメ": "https://www.yomiuri.co.jp/rss/yol/culture.xml",
+        "IT": "https://www.yomiuri.co.jp/rss/yol/science.xml",
+    },
+    "Forbes (ビジネス/海外)": { # 新規追加2
+        "トップ": "https://forbesjapan.com/rss/index.xml",
+        "社会": "https://forbesjapan.com/rss/index.xml",
+        "国際": "https://forbesjapan.com/rss/world.xml",
+        "経済": "https://forbesjapan.com/rss/economy.xml",
+        "スポーツ": "https://forbesjapan.com/rss/index.xml",
+        "エンタメ": "https://forbesjapan.com/rss/lifestyle.xml",
+        "IT": "https://forbesjapan.com/rss/technology.xml",
+    },
+    "Reuters (海外視点)": {
+        "トップ": "https://jp.reuters.com/rss/topNews",
+        "社会": "https://jp.reuters.com/rss/domesticNews",
+        "国際": "https://jp.reuters.com/rss/worldNews",
+        "経済": "https://jp.reuters.com/rss/businessNews",
+        "スポーツ": "https://jp.reuters.com/rss/sportsNews",
+        "エンタメ": "https://jp.reuters.com/rss/entertainmentNews",
+        "IT": "https://jp.reuters.com/rss/technologyNews",
+    },
+    "BBC (海外視点)": {
+        "トップ": "https://feeds.bbci.co.uk/japanese/rss.xml",
+        "社会": "https://feeds.bbci.co.uk/japanese/rss.xml",
+        "国際": "https://feeds.bbci.co.uk/japanese/rss.xml",
+        "経済": "https://feeds.bbci.co.uk/japanese/rss.xml",
+        "スポーツ": "https://feeds.bbci.co.uk/japanese/rss.xml",
+        "エンタメ": "https://feeds.bbci.co.uk/japanese/rss.xml",
+        "IT": "https://feeds.bbci.co.uk/japanese/rss.xml",
+    },
+    "ITmedia/産経/朝日": { # 混合で全ジャンルカバー
+        "トップ": "https://www.sankei.com/rss/news/flash.xml",
+        "社会": "https://www.sankei.com/rss/news/affairs.xml",
+        "国際": "https://www.sankei.com/rss/news/world.xml",
+        "経済": "https://www.asahi.com/rss/asahi/business.rdf",
+        "スポーツ": "https://www.asahi.com/rss/asahi/sports.rdf",
+        "エンタメ": "https://www.sankei.com/rss/news/entertainment.xml",
+        "IT": "https://rss.itmedia.co.jp/rss/2.0/itmedia_all.xml",
+    }
 }
 
 # 追加情報源（Web検索で補完）
@@ -314,10 +360,10 @@ def generate_comparison_analysis(topic_data, category):
         articles_by_source[source].append(article)
     
     # プロンプト作成
-    system_prompt = """あなたは中立的なニュース分析AIです。
-複数のメディアが同じ話題をどのように報じているかを比較し、
-中学生〜高校生にも分かりやすく解説してください。
-感情的・断定的な表現は避け、事実と各メディアの視点の違いを明確に示してください。"""
+    system_prompt = """あなたは国内外の情勢を比較するプロのニュース解説者です。
+複数の視点（国内大手、海外通信社、ビジネス誌、SNS世論）を統合し、
+読者が「情報の偏り」に気づけるような深い分析を提供してください。
+各項目間には必ず空行を入れ、スマートフォンで快適に読めるようにしてください。"""
     
     source_texts = []
     for source, articles in articles_by_source.items():
@@ -325,27 +371,29 @@ def generate_comparison_analysis(topic_data, category):
         source_texts.append(f"【{source}】\n" + "\n".join([f"・{t}" for t in titles]))
     
     user_prompt = f"""
-以下の話題について、各メディアの報道を比較分析してください。
+以下の話題について、多角的な比較分析を行ってください。
 
-【話題のキーワード】: {topic_data['keyword']}
-【ジャンル】: {category}
+【トピック】: {topic_data['keyword']}
+【カテゴリー】: {category}
 
 {chr(10).join(source_texts)}
 
-以下の形式で出力してください：
+以下の形式で出力してください。見やすさを最優先し、項目ごとに適切な余白（空行）を設けてください。
 
-▼ ニュース: （話題の簡潔なタイトル）
+■ ニュース題名：(内容がパッとわかるタイトル)
 
-【何が起きたのか】
-・背景や経緯を含めて5〜6行で説明
-・事実を中心に、時系列が分かるように書く
+【1. 背景と事実関係】
+(何が起きているのか、なぜ注目されているのかを4行程度で分かりやすく解説)
 
-【メディアごとの伝え方の違い】
-・Yahoo!ニュース: （世論や注目点）
-・NHK: （事実・公式発表の扱い方）
-・その他のメディア: （あれば追加）
+【2. 国内主要メディアの報じ方】
+・(NHKや読売新聞などの傾向：公式な情報や国内への影響について)
+・(Yahooなどのネット世論：SNSやコメント欄で何が議論されているか)
 
-※各メディアの視点の違いを簡潔に（各2行程度で）
+【3. 海外・ビジネス視点の捉え方】
+・(Reuters/BBC/Forbesなどの傾向：国際的な評価、経済的インパクト、海外との違いなど)
+
+【4. このニュースの「読みどころ」】
+(各社の報じ方の最大の違いや、読者が今後注目すべきポイントを2行程度で)
 """
 
     try:
