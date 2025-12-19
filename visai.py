@@ -59,65 +59,8 @@ NEWS_SOURCES = {
         "スポーツ": "https://news.yahoo.co.jp/rss/topics/sports.xml",
         "エンタメ": "https://news.yahoo.co.jp/rss/topics/entertainment.xml",
         "IT": "https://news.yahoo.co.jp/rss/topics/it.xml",
-    },
-    "NHK": {
-        "トップ": "https://www.nhk.or.jp/rss/news/cat0.xml",
-        "社会": "https://www.nhk.or.jp/rss/news/cat1.xml",
-        "国際": "https://www.nhk.or.jp/rss/news/cat6.xml",
-        "経済": "https://www.nhk.or.jp/rss/news/cat5.xml",
-        "スポーツ": "https://www.nhk.or.jp/rss/news/cat7.xml",
-        "エンタメ": "https://www.nhk.or.jp/rss/news/cat0.xml", # エンタメ単独がないためトップで代用
-        "IT": "https://www.nhk.or.jp/rss/news/cat3.xml", # 科学・文化
-    },
-    "読売新聞 (国内最大)": { # 新規追加1
-        "トップ": "https://www.yomiuri.co.jp/rss/yol/topnews.xml",
-        "社会": "https://www.yomiuri.co.jp/rss/yol/national.xml",
-        "国際": "https://www.yomiuri.co.jp/rss/yol/world.xml",
-        "経済": "https://www.yomiuri.co.jp/rss/yol/economy.xml",
-        "スポーツ": "https://www.yomiuri.co.jp/rss/yol/sports.xml",
-        "エンタメ": "https://www.yomiuri.co.jp/rss/yol/culture.xml",
-        "IT": "https://www.yomiuri.co.jp/rss/yol/science.xml",
-    },
-    "Forbes (ビジネス/海外)": { # 新規追加2
-        "トップ": "https://forbesjapan.com/rss/index.xml",
-        "社会": "https://forbesjapan.com/rss/index.xml",
-        "国際": "https://forbesjapan.com/rss/world.xml",
-        "経済": "https://forbesjapan.com/rss/economy.xml",
-        "スポーツ": "https://forbesjapan.com/rss/index.xml",
-        "エンタメ": "https://forbesjapan.com/rss/lifestyle.xml",
-        "IT": "https://forbesjapan.com/rss/technology.xml",
-    },
-    "Reuters (海外視点)": {
-        "トップ": "https://jp.reuters.com/rss/topNews",
-        "社会": "https://jp.reuters.com/rss/domesticNews",
-        "国際": "https://jp.reuters.com/rss/worldNews",
-        "経済": "https://jp.reuters.com/rss/businessNews",
-        "スポーツ": "https://jp.reuters.com/rss/sportsNews",
-        "エンタメ": "https://jp.reuters.com/rss/entertainmentNews",
-        "IT": "https://jp.reuters.com/rss/technologyNews",
-    },
-    "BBC (海外視点)": {
-        "トップ": "https://feeds.bbci.co.uk/japanese/rss.xml",
-        "社会": "https://feeds.bbci.co.uk/japanese/rss.xml",
-        "国際": "https://feeds.bbci.co.uk/japanese/rss.xml",
-        "経済": "https://feeds.bbci.co.uk/japanese/rss.xml",
-        "スポーツ": "https://feeds.bbci.co.uk/japanese/rss.xml",
-        "エンタメ": "https://feeds.bbci.co.uk/japanese/rss.xml",
-        "IT": "https://feeds.bbci.co.uk/japanese/rss.xml",
-    },
-    "ITmedia/産経/朝日": { # 混合で全ジャンルカバー
-        "トップ": "https://www.sankei.com/rss/news/flash.xml",
-        "社会": "https://www.sankei.com/rss/news/affairs.xml",
-        "国際": "https://www.sankei.com/rss/news/world.xml",
-        "経済": "https://www.asahi.com/rss/asahi/business.rdf",
-        "スポーツ": "https://www.asahi.com/rss/asahi/sports.rdf",
-        "エンタメ": "https://www.sankei.com/rss/news/entertainment.xml",
-        "IT": "https://rss.itmedia.co.jp/rss/2.0/itmedia_all.xml",
     }
 }
-
-# 追加情報源（Web検索で補完）
-ADDITIONAL_SOURCES = ["朝日新聞", "産経ニュース", "ITmedia", "日経新聞", "Reuters", "BBC"]
 
 # ==========================================
 # JSONベースのデータ管理
@@ -328,77 +271,47 @@ def find_trending_topics(all_articles):
     
     return trending_topics[:5]  # 上位5つの話題を返す
 
-def fetch_article_content(url):
-    """記事のURLから本文を取得（簡易版）"""
-    try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        }
-        response = requests.get(url, headers=headers, timeout=10)
-        response.encoding = response.apparent_encoding
-        
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
-        # 記事本文を抽出（サイトによって異なるため簡易的な実装）
-        paragraphs = soup.find_all('p')
-        content = ' '.join([p.get_text() for p in paragraphs[:10]])
-        
-        return content[:1000]  # 最初の1000文字まで
-    except Exception as e:
-        print(f"❌ Error fetching content from {url}: {e}")
-        return ""
+def generate_comparison_analysis(article, category):
+    """Yahooの記事を起点に、他メディアの視点をAIが検索・比較分析する"""
+    
+    title = article['title']
+    link = article['link']
+    
+    system_prompt = """あなたは国内外の報道機関の論調に精通したプロのニュースアナリストです。
+提供されたニュースに対し、OpenAIの検索機能や知識を用いて、他の主要メディア（朝日、産経、日経、ロイター、BBC等）が
+この件をどのような切り口で報じているか、あるいは報じる可能性があるかを分析してください。
+読者が「情報の偏り」や「多角的な視点」に気づけるような深い分析を提供してください。"""
 
-def generate_comparison_analysis(topic_data, category):
-    """複数ソースの記事を比較分析してAIで要約"""
-    
-    # 各ソースの記事情報を整理
-    articles_by_source = {}
-    for article in topic_data['articles']:
-        source = article['source']
-        if source not in articles_by_source:
-            articles_by_source[source] = []
-        articles_by_source[source].append(article)
-    
-    # プロンプト作成
-    system_prompt = """あなたは国内外の情勢を比較するプロのニュース解説者です。
-複数の視点（国内大手、海外通信社、ビジネス誌、SNS世論）を統合し、
-読者が「情報の偏り」に気づけるような深い分析を提供してください。
-各項目間には必ず空行を入れ、スマートフォンで快適に読めるようにしてください。"""
-    
-    source_texts = []
-    for source, articles in articles_by_source.items():
-        titles = [a['title'] for a in articles[:3]]
-        source_texts.append(f"【{source}】\n" + "\n".join([f"・{t}" for t in titles]))
-    
     user_prompt = f"""
-以下の話題について、多角的な比較分析を行ってください。
+以下のYahooニュースについて、他メディアとの比較分析を行ってください。
 
-【トピック】: {topic_data['keyword']}
+【元のニュース】: {title}
 【カテゴリー】: {category}
+【URL】: {link}
 
-{chr(10).join(source_texts)}
-
-以下の形式で出力してください。見やすさを最優先し、項目ごとに適切な余白（空行）を設けてください。
+以下の形式で出力してください。
 
 ■ ニュース題名：(内容がパッとわかるタイトル)
 
-【1. 背景と事実関係】
-(何が起きているのか、なぜ注目されているのかを4行程度で分かりやすく解説)
+【1. このニュースの核心】
+(何が起きているのか、なぜ重要なのかを3行程度で解説)
 
-【2. 国内主要メディアの報じ方】
-・(NHKや読売新聞などの傾向：公式な情報や国内への影響について)
-・(Yahooなどのネット世論：SNSやコメント欄で何が議論されているか)
+【2. 他メディアとの視点の違い】
+・(リベラル寄りメディア/保守寄りメディアでの扱いの差)
+・(経済紙や専門紙が注目している独自のポイント)
+・(もし海外に関連する場合、海外メディアの冷めた視点や独自の指摘)
 
-【3. 海外・ビジネス視点の捉え方】
-・(Reuters/BBC/Forbesなどの傾向：国際的な評価、経済的インパクト、海外との違いなど)
+【3. ネット・SNSの反応】
+(Yahooコメント欄やXなどで、どのような賛否両論が起きているか)
 
-【4. このニュースの「読みどころ」】
-(各社の報じ方の最大の違いや、読者が今後注目すべきポイントを2行程度で)
+【4. このニュースの「裏側」を読む】
+(今後、どのような展開が予想されるか、読者が注意すべき点は何か)
 """
 
     try:
+        # ツール(検索)の使用を想定した最新のGPT-4oモデルを使用
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-4o", # 検索精度を高めるため4oを推奨
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
@@ -409,53 +322,31 @@ def generate_comparison_analysis(topic_data, category):
         return response.choices[0].message.content.strip()
     except Exception as e:
         print(f"❌ OpenAI API Error: {e}")
-        return f"【{topic_data['keyword']}】に関するニュース\n（AI分析に失敗しました）"
+        return f"【{title}】に関する分析に失敗しました。"
 
 def get_comparative_news(category):
-    """多角的ニュース比較のメイン処理"""
+    """Yahooからニュースを取得し、一つのニュースを深掘りするメイン処理"""
     timestamp = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
-    print(f"📊 [{timestamp}] Starting comparative news analysis for {category}")
+    print(f"📊 [{timestamp}] Starting AI deep-analysis for {category} (Yahoo based)")
     
-    # 各ソースから記事を取得
-    all_articles = []
+    # Yahooから記事を取得
+    articles = fetch_rss_articles("Yahoo", category)
     
-    for source_name in ["Yahoo", "NHK"]:
-        articles = fetch_rss_articles(source_name, category)
-        all_articles.extend(articles)
-        print(f"   → Fetched {len(articles)} articles from {source_name}")
+    if not articles:
+        return "現在、Yahooニュースを取得できませんでした。"
     
-    if not all_articles:
-        return "現在、ニュースを取得できませんでした。しばらくしてから再度お試しください。"
+    # 最初の1件（最も注目されている記事）を詳細分析の対象にする
+    target_article = articles[0]
     
-    # 話題性の高いトピックを特定
-    trending_topics = find_trending_topics(all_articles)
+    print(f"   → Analyzing top article: {target_article['title']}")
     
-    if not trending_topics:
-        return "現在、複数のメディアで共通して扱われている話題が見つかりませんでした。"
+    # AIによる多角的分析の生成
+    analysis = generate_comparison_analysis(target_article, category)
     
-    print(f"   → Found {len(trending_topics)} trending topics")
+    final_message = f"📰 【{category}】AI多角的ニュース比較\n\n" + analysis
     
-    # 各トピックについて比較分析
-    analyses = []
-    
-    for i, topic in enumerate(trending_topics[:3], 1):  # 上位3つのトピックを分析
-        print(f"   → Analyzing topic {i}: {topic['keyword']}")
-        analysis = generate_comparison_analysis(topic, category)
-        analyses.append(analysis)
-        
-        if i < len(trending_topics[:3]):
-            analyses.append("\n" + "="*40 + "\n")
-    
-    final_message = f"📰 【{category}】多角的ニュース比較\n\n" + "\n".join(analyses)
-    
-    # 記事リンクを追加
-    links = []
-    for topic in trending_topics[:3]:
-        for article in topic['articles'][:2]:
-            links.append(f"🔗 [{article['source']}] {article['title'][:20]}...\n{article['link']}")
-    
-    if links:
-        final_message += f"\n\n{'='*40}\n👇 詳細記事はこちら\n" + "\n\n".join(links[:5])
+    # 元記事へのリンク
+    final_message += f"\n\n{'='*40}\n👇 元のニュース（Yahoo）\n{target_article['title']}\n{target_article['link']}"
     
     return final_message
 
