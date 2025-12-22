@@ -459,7 +459,6 @@ def handle_message(event):
         settings = get_user_settings(user_id)
         print(f"🚀 [{timestamp}] Immediate delivery requested by {user_id}")
         threading.Thread(target=push_news, args=(user_id, settings['genre']), daemon=True).start()
-        line_bot_api.reply_message(event.reply_token, TextSendMessage("📰 ニュースを取得中です...少々お待ちください！"))
         return
 
     if msg == "設定変更":
