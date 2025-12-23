@@ -3,6 +3,7 @@ import sqlite3
 import threading
 import time
 import feedparser
+import random
 from datetime import datetime
 from pytz import timezone
 from flask import Flask, request, abort, render_template_string, url_for
@@ -211,92 +212,120 @@ def get_users_by_time(target_time):
         return []
 
 # ==========================================
-# ニュース取得・AI要約ロジック
+# ニュース取得・AI深掘り分析
 # ==========================================
-def get_news_content(category):
+def get_random_news_and_related(category):
+    """指定カテゴリーからランダムに1件のニュースと関連ニュース5件を取得"""
     if category not in RSS_URL:
         category = "トップ"
     
     feed = feedparser.parse(RSS_URL[category])
-    items = []
-    for entry in feed.entries[:5]:
-        items.append(f"・{entry.title} ({entry.link})")
     
-    return "\n".join(items)
+    if not feed.entries:
+        return None, []
+    
+    # ランダムに1件選択
+    main_article = random.choice(feed.entries[:10])
+    
+    # 関連ニュースとして残りの記事から5件取得（重複を除く）
+    related_articles = [entry for entry in feed.entries if entry.link != main_article.link][:5]
+    
+    return main_article, related_articles
 
-# ==========================================
-# ニュース取得・AI要約ロジック
-# ==========================================
-def generate_ai_summary(news_text, category):
-    """ニュースを多角的な視点で要約する"""
+def generate_deep_dive_summary(article, category):
+    """選択されたニュースを深掘り分析"""
     system_prompt = (
-        "あなたは中立公正かつどの年代からも好かれるニュース解説アナリストです。"
-        "複雑なニュースを「評価・批判」の2つの視点から整理し、ユーザーが多角的に判断できるように助けて、中高生でも読みやすい文章を心がけてください。"
+        "あなたは中立公正で信頼されるニュース解説アナリストです。"
+        "1つのニュースを深く掘り下げ、多角的な視点から分析し、"
+        "中学生でも理解しやすい文章で解説してください。"
     )
     
     user_prompt = f"""
-    以下のニュースリスト（ジャンル：{category}）を読み、LINE配信用のダイジェストを作成してください。
+以下のニュース記事について、深掘り分析を行ってください。
 
-    ### ニュース内容:
-    {news_text}
+### 記事情報:
+タイトル: {article.title}
+ジャンル: {category}
 
-    ### 指示事項:
-    1. 冒頭に「お疲れ様です！本日の{category}ニュースを多角的にお届けします💡」という挨拶を入れてください。
-    2. 各記事について、以下の形式を厳守して記述してください。
-       【数字. ニュースのタイトル】
-       ニュースの内容（詳しく）
-       
-       ・👍評価: (このニュースに対するポジティブな意見やメリット)
-       
-       ・🤔批判: (懸念点、反対意見、デメリット)
-    3. 各意見（評価・批判）は、一般的な世論やニュースソースに基づいた推測を含めて構成してください。
-    4. 読みやすさを配慮し、それぞれの項目に空白を入れてください。
-    5. 全てのニュースを解説し終わったあと、それぞれのニュースURLを一番下に提示してください。
-    """
+### 出力形式（必ず以下の構成で記述してください）:
+
+1. 【挨拶】
+お疲れ様です！本日の{category}ニュースを深掘りしてお届けします📰
+
+2. 【ニュースタイトル】
+{article.title}
+
+3. 【ニュース内容】
+このニュースの背景や詳細な内容を3〜4文で丁寧に説明してください。
+
+4. 【👍 評価している意見】
+このニュースに対して肯定的・評価する立場からの意見を2〜3点挙げてください。
+それぞれの意見について、なぜそう考えられるのか理由も含めて説明してください。
+
+5. 【🤔 反対している意見】
+このニュースに対して批判的・懸念を示す立場からの意見を2〜3点挙げてください。
+それぞれの意見について、どのような問題点があるのか具体的に説明してください。
+
+6. 【💡 まとめ】
+このニュースについて、両方の視点を踏まえた上での簡潔なまとめを2〜3文で記述してください。
+
+### 注意事項:
+- 各セクションの間に空行を入れて読みやすくしてください
+- 専門用語は必要に応じて簡単に説明してください
+- 感情的にならず、客観的な分析を心がけてください
+- 断定的な表現は避け、「〜と考えられます」「〜という意見があります」など柔らかい表現を使ってください
+"""
 
     try:
         response = client.chat.completions.create(
-            model="gpt-4.1-nano",
+            model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            max_tokens=800,
+            max_tokens=1200,
             temperature=0.7
         )
         return response.choices[0].message.content.strip()
     except Exception as e:
         print(f"❌ OpenAI API Error: {e}")
-        return "申し訳ありません。AIによる要約の生成に失敗しました。"
+        return "申し訳ありません。AIによる分析の生成に失敗しました。"
 
 def push_news(user_id, category):
-    """指定ユーザーにニュースを送信する処理"""
+    """指定ユーザーにニュースを送信する処理（深掘り版）"""
     timestamp = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
-    print(f"📤 [{timestamp}] Start pushing news to {user_id} (Genre: {category})")
+    print(f"📤 [{timestamp}] Start pushing deep-dive news to {user_id} (Genre: {category})")
     
     try:
-        feed = feedparser.parse(RSS_URL.get(category, RSS_URL["トップ"]))
-        if not feed.entries:
+        # ランダムに1件のメインニュースと関連ニュース5件を取得
+        main_article, related_articles = get_random_news_and_related(category)
+        
+        if not main_article:
             print(f"⚠️ [{timestamp}] No news entries found for {user_id} in category {category}")
             return
 
-        articles_for_ai = []
-        for entry in feed.entries[:5]:
-            articles_for_ai.append(f"タイトル: {entry.title}\nリンク: {entry.link}")
-        input_text = "\n\n".join(articles_for_ai)
+        # メイン記事の深掘り分析を生成
+        deep_dive_summary = generate_deep_dive_summary(main_article, category)
 
-        summary_text = generate_ai_summary(input_text, category)
+        # メイン記事のリンク
+        main_link_text = f"\n\n🔗 詳細記事はこちら\n{main_article.link}"
 
-        links_text = "\n".join([f"🔗 {e.title[:15]}...\n{e.link}" for e in feed.entries[:5]])
-        final_message = f"{summary_text}\n\n👇 気になる記事をチェック\n{links_text}"
+        # 関連ニュースのリンク
+        related_links_text = "\n\n━━━━━━━━━━━━━━━━\n📰 その他の関連ニュース\n"
+        for i, entry in enumerate(related_articles, 1):
+            related_links_text += f"\n{i}. {entry.title}\n{entry.link}\n"
+
+        # 最終メッセージの組み立て
+        final_message = f"{deep_dive_summary}{main_link_text}{related_links_text}"
 
         line_bot_api.push_message(user_id, TextSendMessage(text=final_message))
-        print(f"✅ [{timestamp}] Successfully sent news to {user_id}")
+        print(f"✅ [{timestamp}] Successfully sent deep-dive news to {user_id}")
         
         increment_delivery_count(user_id)
         
         settings = get_user_settings(user_id)
         
+        # 6回目の配信後に応援メッセージを表示
         if settings['delivery_count'] >= 6 and settings['support_message_shown'] == 0:
             support_message = (
                 "いつもVisAIを使ってくれてありがとうございます！🙏\n\n"
@@ -497,7 +526,7 @@ scheduler_thread = threading.Thread(target=schedule_checker, daemon=True)
 scheduler_thread.start()
 
 startup_time = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
-print(f"✅ [{startup_time}] VisAI LINE Bot started successfully")
+print(f"✅ [{startup_time}] VisAI LINE Bot started successfully (Deep-Dive Mode)")
 
 if __name__ == "__main__":
     app.run(debug=True, host='0.0.0.0', port=10000)
