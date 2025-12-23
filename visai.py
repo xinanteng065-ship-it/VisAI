@@ -333,7 +333,7 @@ def push_news(user_id, category):
         # 最終メッセージの組み立て
         final_message = f"{deep_dive_summary}{main_link_text}{related_links_text}"
 
-        line_bot_api.push_message(user_id, TextSendMessage(text=final_message))
+        line_bot_api.reply_message(user_id, TextSendMessage(text=final_message))
         print(f"✅ [{timestamp}] Successfully sent deep-dive news to {user_id}")
         
         increment_delivery_count(user_id)
