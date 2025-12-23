@@ -269,7 +269,8 @@ def generate_deep_dive_summary(article, category):
 6. 【💡 まとめ】
 このニュースについて、両方の視点を踏まえた上での簡潔なまとめを2〜3文で記述してください。
 
-### 注意事項:
+注意事項:
+- "###"や"**"などの記号は使わないでください
 - 各セクションの間に空行を入れて読みやすくしてください
 - 専門用語は必要に応じて簡単に説明してください
 - 感情的にならず、客観的な分析を心がけてください
@@ -283,7 +284,7 @@ def generate_deep_dive_summary(article, category):
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            max_tokens=750,
+            max_tokens=550,
             temperature=0.7
         )
         return response.choices[0].message.content.strip()
@@ -329,7 +330,7 @@ def push_news(user_id, category):
         if settings['delivery_count'] >= 6 and settings['support_message_shown'] == 0:
             support_message = (
                 "いつもVisAIを使ってくれてありがとうございます！🙏\n\n"
-                "このbotは学生の個人開発で、サーバー代やAIの利用料を自腹で運営しています。\n\n"
+                "このbotは中学生の個人開発で、サーバー代やAIの利用料を自腹で運営しています。\n\n"
                 "もし応援してもいいかなと思ってもらえたら、100円の応援PDFをBoothに置いています。\n"
                 "無理はしないでください🙏\n\n"
                 f"↓応援はこちらから\n{BOOTH_SUPPORT_URL}"
@@ -411,7 +412,50 @@ def settings():
     
     if not user_id:
         print(f"⚠️ [{timestamp}] Settings page accessed without user_id")
-        return "エラー: ユーザーIDが見つかりません。LINEから再度アクセスしてください。"
+        return """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>エラー</title>
+            <style>
+                body {
+                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+                    padding: 20px;
+                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                    min-height: 100vh;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                }
+                .container {
+                    max-width: 400px;
+                    background: white;
+                    padding: 40px 30px;
+                    border-radius: 16px;
+                    box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+                    text-align: center;
+                }
+                h2 {
+                    color: #e74c3c;
+                    margin-bottom: 15px;
+                    font-size: 24px;
+                }
+                p {
+                    color: #555;
+                    font-size: 16px;
+                    line-height: 1.6;
+                }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h2>⚠️ エラー</h2>
+                <p>ユーザーIDが見つかりません。<br>LINEから再度アクセスしてください。</p>
+            </div>
+        </body>
+        </html>
+        """
 
     if request.method == 'POST':
         new_time = request.form.get('delivery_time')
@@ -421,11 +465,85 @@ def settings():
         update_user_settings(user_id, new_time, new_genre)
         
         return """
-        <div style="text-align:center; padding: 20px; font-family: sans-serif;">
-            <h2>✅ 設定を保存しました!</h2>
-            <p>設定した時間にニュースが届きます。</p>
-            <p>LINEの画面に戻ってください。</p>
-        </div>
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>設定完了</title>
+            <style>
+                body {
+                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+                    padding: 20px;
+                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                    min-height: 100vh;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    margin: 0;
+                }
+                .container {
+                    max-width: 400px;
+                    background: white;
+                    padding: 50px 30px;
+                    border-radius: 16px;
+                    box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+                    text-align: center;
+                    animation: slideIn 0.4s ease-out;
+                }
+                @keyframes slideIn {
+                    from {
+                        opacity: 0;
+                        transform: translateY(-20px);
+                    }
+                    to {
+                        opacity: 1;
+                        transform: translateY(0);
+                    }
+                }
+                .success-icon {
+                    width: 80px;
+                    height: 80px;
+                    background: #00B900;
+                    border-radius: 50%;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    margin: 0 auto 25px;
+                    font-size: 45px;
+                }
+                h2 {
+                    color: #333;
+                    margin-bottom: 20px;
+                    font-size: 26px;
+                    font-weight: 600;
+                }
+                p {
+                    color: #666;
+                    font-size: 18px;
+                    line-height: 1.8;
+                    margin: 12px 0;
+                }
+                .back-notice {
+                    margin-top: 30px;
+                    padding: 15px;
+                    background: #f8f9fa;
+                    border-radius: 8px;
+                    color: #555;
+                    font-size: 15px;
+                }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="success-icon">✓</div>
+                <h2>設定を保存しました！</h2>
+                <p>設定した時間にニュースが届きます。</p>
+                <div class="back-notice">
+                    LINEの画面に戻ってください
+                </div>
+            </div>
+        </body>
+        </html>
         """
 
     current_settings = get_user_settings(user_id)
@@ -436,30 +554,201 @@ def settings():
     <html>
     <head>
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>ニュース配信設定</title>
+        <meta charset="UTF-8">
+        <title>ニュース配信設定 - VisAI</title>
         <style>
-            body {{ font-family: sans-serif; padding: 20px; background-color: #f0f0f0; }}
-            .container {{ max-width: 400px; margin: 0 auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }}
-            h2 {{ text-align: center; color: #333; }}
-            label {{ display: block; margin-top: 15px; font-weight: bold; }}
-            select, input[type="time"] {{ width: 100%; padding: 10px; margin-top: 5px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; }}
-            button {{ width: 100%; padding: 12px; background-color: #00B900; color: white; border: none; border-radius: 4px; margin-top: 20px; font-size: 16px; cursor: pointer; }}
-            button:hover {{ background-color: #009900; }}
+            * {{
+                margin: 0;
+                padding: 0;
+                box-sizing: border-box;
+            }}
+            
+            body {{
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', sans-serif;
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                min-height: 100vh;
+                padding: 20px;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+            }}
+            
+            .container {{
+                max-width: 420px;
+                width: 100%;
+                background: white;
+                padding: 35px 30px;
+                border-radius: 20px;
+                box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+                animation: fadeIn 0.5s ease-out;
+            }}
+            
+            @keyframes fadeIn {{
+                from {{
+                    opacity: 0;
+                    transform: translateY(20px);
+                }}
+                to {{
+                    opacity: 1;
+                    transform: translateY(0);
+                }}
+            }}
+            
+            .header {{
+                text-align: center;
+                margin-bottom: 30px;
+            }}
+            
+            .header-icon {{
+                font-size: 48px;
+                margin-bottom: 10px;
+            }}
+            
+            h2 {{
+                color: #2c3e50;
+                font-size: 24px;
+                font-weight: 600;
+                margin-bottom: 8px;
+            }}
+            
+            .subtitle {{
+                color: #7f8c8d;
+                font-size: 14px;
+            }}
+            
+            .form-group {{
+                margin-bottom: 25px;
+            }}
+            
+            label {{
+                display: block;
+                color: #2c3e50;
+                font-weight: 600;
+                font-size: 15px;
+                margin-bottom: 10px;
+                display: flex;
+                align-items: center;
+                gap: 8px;
+            }}
+            
+            .label-icon {{
+                font-size: 18px;
+            }}
+            
+            input[type="time"],
+            select {{
+                width: 100%;
+                padding: 14px 16px;
+                font-size: 16px;
+                border: 2px solid #e0e0e0;
+                border-radius: 12px;
+                background-color: #f8f9fa;
+                transition: all 0.3s ease;
+                font-family: inherit;
+            }}
+            
+            input[type="time"]:focus,
+            select:focus {{
+                outline: none;
+                border-color: #667eea;
+                background-color: white;
+                box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+            }}
+            
+            select {{
+                cursor: pointer;
+                appearance: none;
+                background-image: url("data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3e%3cpolyline points='6 9 12 15 18 9'%3e%3c/polyline%3e%3c/svg%3e");
+                background-repeat: no-repeat;
+                background-position: right 12px center;
+                background-size: 20px;
+                padding-right: 40px;
+            }}
+            
+            select option {{
+                padding: 10px;
+            }}
+            
+            button {{
+                width: 100%;
+                padding: 16px;
+                background: linear-gradient(135deg, #00B900 0%, #00a000 100%);
+                color: white;
+                border: none;
+                border-radius: 12px;
+                font-size: 17px;
+                font-weight: 600;
+                cursor: pointer;
+                transition: all 0.3s ease;
+                box-shadow: 0 4px 15px rgba(0, 185, 0, 0.3);
+                margin-top: 10px;
+            }}
+            
+            button:hover {{
+                background: linear-gradient(135deg, #00a000 0%, #008f00 100%);
+                transform: translateY(-2px);
+                box-shadow: 0 6px 20px rgba(0, 185, 0, 0.4);
+            }}
+            
+            button:active {{
+                transform: translateY(0);
+            }}
+            
+            .current-settings {{
+                background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+                padding: 15px;
+                border-radius: 12px;
+                margin-bottom: 25px;
+                color: white;
+                font-size: 14px;
+                text-align: center;
+            }}
+            
+            .current-settings strong {{
+                font-weight: 600;
+            }}
+            
+            .divider {{
+                height: 1px;
+                background: linear-gradient(to right, transparent, #e0e0e0, transparent);
+                margin: 25px 0;
+            }}
         </style>
     </head>
     <body>
         <div class="container">
-            <h2>⚙️ 配信設定</h2>
+            <div class="header">
+                <div class="header-icon">⚙️</div>
+                <h2>配信設定</h2>
+                <p class="subtitle">お好みの時間とジャンルを設定できます</p>
+            </div>
+            
+            <div class="current-settings">
+                現在の設定: <strong>{current_settings['time']}</strong> に <strong>{current_settings['genre']}</strong>ニュース
+            </div>
+            
             <form method="POST">
-                <label>配信時間:</label>
-                <input type="time" name="delivery_time" value="{current_settings['time']}" required>
+                <div class="form-group">
+                    <label>
+                        <span class="label-icon">🕐</span>
+                        配信時間
+                    </label>
+                    <input type="time" name="delivery_time" value="{current_settings['time']}" required>
+                </div>
                 
-                <label>ニュースジャンル:</label>
-                <select name="genre">
-                    {''.join([f'<option value="{k}" {"selected" if k == current_settings["genre"] else ""}>{k}</option>' for k in RSS_URL.keys()])}
-                </select>
+                <div class="divider"></div>
                 
-                <button type="submit">設定を保存</button>
+                <div class="form-group">
+                    <label>
+                        <span class="label-icon">📰</span>
+                        ニュースジャンル
+                    </label>
+                    <select name="genre">
+                        {''.join([f'<option value="{k}" {"selected" if k == current_settings["genre"] else ""}>{k}</option>' for k in RSS_URL.keys()])}
+                    </select>
+                </div>
+                
+                <button type="submit">💾 設定を保存する</button>
             </form>
         </div>
     </body>
@@ -498,11 +787,11 @@ def handle_message(event):
         threading.Thread(target=push_news, args=(user_id, settings['genre']), daemon=True).start()
         return
 
-    if msg == "設定変更":
+    if msg == "設定":
         settings_url = f"{APP_PUBLIC_URL}/settings?user_id={user_id}"
         
         reply_text = (
-            "⚙️ 設定変更\n"
+            "⚙️ 設定\n"
             "以下のリンクから配達時間とジャンルを変更できます。\n\n"
             f"{settings_url}\n\n"
             "※リンクを知っている人は誰でも設定を変更できてしまうため、他人に教えないでください。"
@@ -513,7 +802,7 @@ def handle_message(event):
 
     line_bot_api.reply_message(
         event.reply_token,
-        TextSendMessage("💡メニュー\n・「今すぐ」: 今すぐニュースを受信\n・「設定変更」: 時間やジャンルを変更")
+        TextSendMessage("💡メニュー\n・「今すぐ」: 今すぐニュースを受信\n・「設定」: 時間やジャンルを変更")
     )
     print(f"ℹ️ [{timestamp}] Help menu sent to {user_id}")
 
