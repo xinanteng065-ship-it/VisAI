@@ -283,7 +283,7 @@ def generate_deep_dive_summary(article, category):
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            max_tokens=1200,
+            max_tokens=750,
             temperature=0.7
         )
         return response.choices[0].message.content.strip()
