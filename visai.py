@@ -352,7 +352,7 @@ def push_news(user_id, category):
             
             try:
                 time.sleep(2)
-                line_bot_api.push_message(user_id, TextSendMessage(text=support_message))
+                line_bot_api.reply_message(user_id, TextSendMessage(text=support_message))
                 mark_support_message_shown(user_id)
                 print(f"💝 [{timestamp}] Support message sent to {user_id}")
             except Exception as e:
