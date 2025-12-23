@@ -146,24 +146,38 @@ def update_user_settings(user_id, delivery_time, genre):
         conn, db_type = get_db_connection()
         c = conn.cursor()
         
+        print(f"🔧 Updating settings for {user_id}: time={delivery_time}, genre={genre}, db_type={db_type}")
+        
         if db_type == 'postgres':
             c.execute('''
                 INSERT INTO users (user_id, delivery_time, genre, delivery_count, support_message_shown) 
                 VALUES (%s, %s, %s, 0, 0)
-                ON CONFLICT(user_id) DO UPDATE SET delivery_time=EXCLUDED.delivery_time, genre=EXCLUDED.genre
+                ON CONFLICT(user_id) DO UPDATE SET 
+                    delivery_time=EXCLUDED.delivery_time, 
+                    genre=EXCLUDED.genre
             ''', (user_id, delivery_time, genre))
         else:
             c.execute('''
                 INSERT INTO users (user_id, delivery_time, genre, delivery_count, support_message_shown) 
                 VALUES (?, ?, ?, 0, 0)
-                ON CONFLICT(user_id) DO UPDATE SET delivery_time=excluded.delivery_time, genre=excluded.genre
+                ON CONFLICT(user_id) DO UPDATE SET 
+                    delivery_time=excluded.delivery_time, 
+                    genre=excluded.genre
             ''', (user_id, delivery_time, genre))
         
         conn.commit()
+        
+        # 確認のため更新後の値を取得
+        placeholder = '%s' if db_type == 'postgres' else '?'
+        c.execute(f'SELECT delivery_time, genre FROM users WHERE user_id = {placeholder}', (user_id,))
+        result = c.fetchone()
+        print(f"✅ Verified settings for {user_id}: {result}")
+        
         conn.close()
-        print(f"✅ Updated settings for {user_id}: {delivery_time}, {genre}")
     except Exception as e:
         print(f"❌ update_user_settings error for user {user_id}: {e}")
+        import traceback
+        traceback.print_exc()
 
 def increment_delivery_count(user_id):
     """配信回数をインクリメント"""
@@ -270,7 +284,7 @@ def generate_deep_dive_summary(article, category):
 このニュースについて、両方の視点を踏まえた上での簡潔なまとめを2〜3文で記述してください。
 
 注意事項:
-- "###"や"**"などの記号は使わないでください
+- "###"や"**"などは使わないでください（絵文字などは使っても大丈夫です。）
 - 各セクションの間に空行を入れて読みやすくしてください
 - 専門用語は必要に応じて簡単に説明してください
 - 感情的にならず、客観的な分析を心がけてください
