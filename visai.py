@@ -226,7 +226,7 @@ def get_users_by_time(target_time):
         return []
 
 # ==========================================
-# ニュース取得・AI深掘り分析
+# ニュース取得・AI深掘り分析・本文生成
 # ==========================================
 def get_random_news_and_related(category):
     """指定カテゴリーからランダムに1件のニュースと関連ニュース5件を取得"""
@@ -306,18 +306,14 @@ def generate_deep_dive_summary(article, category):
         print(f"❌ OpenAI API Error: {e}")
         return "申し訳ありません。AIによる分析の生成に失敗しました。"
 
-def push_news(user_id, category):
-    """指定ユーザーにニュースを送信する処理（深掘り版）"""
-    timestamp = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
-    print(f"📤 [{timestamp}] Start pushing deep-dive news to {user_id} (Genre: {category})")
-    
+def create_news_content(user_id, category):
+    """ニュースの本文を作成して返す（送信はしない・共通処理）"""
     try:
         # ランダムに1件のメインニュースと関連ニュース5件を取得
         main_article, related_articles = get_random_news_and_related(category)
         
         if not main_article:
-            print(f"⚠️ [{timestamp}] No news entries found for {user_id} in category {category}")
-            return
+            return "申し訳ありません。現在ニュースが取得できませんでした。"
 
         # メイン記事の深掘り分析を生成
         deep_dive_summary = generate_deep_dive_summary(main_article, category)
@@ -332,15 +328,30 @@ def push_news(user_id, category):
 
         # 最終メッセージの組み立て
         final_message = f"{deep_dive_summary}{main_link_text}{related_links_text}"
-
-        line_bot_api.push_message(user_id, TextSendMessage(text=final_message))
-        print(f"✅ [{timestamp}] Successfully sent deep-dive news to {user_id}")
         
+        # 配信回数をインクリメント（見た回数としてカウント）
         increment_delivery_count(user_id)
         
-        settings = get_user_settings(user_id)
+        return final_message
+
+    except Exception as e:
+        print(f"❌ Error generating content: {e}")
+        return "ニュースの生成中にエラーが発生しました。"
+
+def push_news(user_id, category):
+    """【スケジューラー用】指定ユーザーにニュースをプッシュ送信する（有料枠消費）"""
+    timestamp = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
+    print(f"📤 [{timestamp}] Start pushing deep-dive news to {user_id} (Genre: {category})")
+    
+    try:
+        # ニュース本文を作成
+        content = create_news_content(user_id, category)
         
-        # 6回目の配信後に応援メッセージを表示
+        # メッセージオブジェクトのリスト作成
+        messages = [TextSendMessage(text=content)]
+        
+        # 応援メッセージが必要か確認
+        settings = get_user_settings(user_id)
         if settings['delivery_count'] >= 6 and settings['support_message_shown'] == 0:
             support_message = (
                 "いつもVisAIを使ってくれてありがとうございます！🙏\n\n"
@@ -349,14 +360,13 @@ def push_news(user_id, category):
                 "無理はしないでください🙏\n\n"
                 f"↓応援はこちらから\n{BOOTH_SUPPORT_URL}"
             )
-            
-            try:
-                time.sleep(2)
-                line_bot_api.reply_message(user_id, TextSendMessage(text=support_message))
-                mark_support_message_shown(user_id)
-                print(f"💝 [{timestamp}] Support message sent to {user_id}")
-            except Exception as e:
-                print(f"❌ [{timestamp}] Failed to send support message to {user_id}: {e}")
+            messages.append(TextSendMessage(text=support_message))
+            mark_support_message_shown(user_id)
+            print(f"💝 [{timestamp}] Support message appended for {user_id}")
+
+        # 送信（Push）
+        line_bot_api.push_message(user_id, messages)
+        print(f"✅ [{timestamp}] Successfully sent deep-dive news to {user_id}")
         
     except Exception as e:
         print(f"❌ [{timestamp}] Push Error for {user_id}: {e}")
@@ -789,6 +799,10 @@ def callback():
 
 @web_hook_handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
+    """
+    メッセージ受信時の処理
+    【重要】「今すぐ」に対する処理をPushからReply（無料）に変更
+    """
     user_id = event.source.user_id
     msg = event.message.text.strip()
     timestamp = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
@@ -798,7 +812,31 @@ def handle_message(event):
     if msg == "今すぐ":
         settings = get_user_settings(user_id)
         print(f"🚀 [{timestamp}] Immediate delivery requested by {user_id}")
-        threading.Thread(target=push_news, args=(user_id, settings['genre']), daemon=True).start()
+        
+        # ニュース本文の生成（Pushではなくテキスト生成だけを行う）
+        # ※OpenAIの処理に時間がかかりすぎるとReplyToken（約30秒）が切れるリスクがありますが、
+        #   無料化のためにここでは同期処理（待機）を行います。
+        news_text = create_news_content(user_id, settings['genre'])
+        
+        # 返信用のメッセージリスト作成
+        reply_messages = [TextSendMessage(text=news_text)]
+        
+        # 応援メッセージが必要な場合は2通目として追加（これもReplyに含めれば無料）
+        if settings['delivery_count'] >= 6 and settings['support_message_shown'] == 0:
+            support_message = (
+                "いつもVisAIを使ってくれてありがとうございます！🙏\n\n"
+                "このbotは中学生の個人開発で、サーバー代やAIの利用料を自腹で運営しています。\n\n"
+                "もし応援してもいいかなと思ってもらえたら、100円の応援PDFをBoothに置いています。\n"
+                "無理はしないでください🙏\n\n"
+                f"↓応援はこちらから\n{BOOTH_SUPPORT_URL}"
+            )
+            reply_messages.append(TextSendMessage(text=support_message))
+            mark_support_message_shown(user_id)
+            print(f"💝 [{timestamp}] Support message appended to reply for {user_id}")
+        
+        # 無料のReplyMessageを使って送信
+        line_bot_api.reply_message(event.reply_token, reply_messages)
+        print(f"✅ [{timestamp}] Sent via Reply (Free) to {user_id}")
         return
 
     if msg == "設定":
@@ -814,9 +852,10 @@ def handle_message(event):
         print(f"⚙️ [{timestamp}] Settings link sent to {user_id}")
         return
 
+    # メニュー表示（ここもReplyなので無料）
     line_bot_api.reply_message(
         event.reply_token,
-        TextSendMessage("💡メニュー\n・「今すぐ」: 今すぐニュースを受信\n・「設定」: 時間やジャンルを変更")
+        TextSendMessage("💡メニュー\n・「今すぐ」: 今すぐニュースを受信(無料)\n・「設定」: 時間やジャンルを変更")
     )
     print(f"ℹ️ [{timestamp}] Help menu sent to {user_id}")
 
@@ -825,11 +864,14 @@ def handle_message(event):
 # ==========================================
 init_db()
 
+# スケジューラー起動
+# 【注意】朝の自動配信は「プッシュメッセージ」なので有料枠を消費します。
+# 完全に無料にしたい場合は、下の2行をコメントアウト（#をつける）してください。
 scheduler_thread = threading.Thread(target=schedule_checker, daemon=True)
 scheduler_thread.start()
 
 startup_time = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
-print(f"✅ [{startup_time}] VisAI LINE Bot started successfully (Deep-Dive Mode)")
+print(f"✅ [{startup_time}] VisAI LINE Bot started successfully (Deep-Dive & Free-Reply Mode)")
 
 if __name__ == "__main__":
     app.run(debug=True, host='0.0.0.0', port=10000)
