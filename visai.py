@@ -372,20 +372,44 @@ def push_news(user_id, category):
         print(f"❌ [{timestamp}] Push Error for {user_id}: {e}")
 
 # ==========================================
-# スケジューラー（改善版）
+# スケジューラー（デバッグ強化版）
 # ==========================================
 def schedule_checker():
-    """毎分00秒に正確に実行（改善版）"""
-    print("🚀 Scheduler thread started")
+    """毎分00秒に正確に実行（デバッグ強化版）"""
+    print("=" * 70)
+    print("🚀 SCHEDULER THREAD STARTED")
+    print("=" * 70)
+    
+    # 起動直後に全ユーザー設定を表示
+    try:
+        conn, db_type = get_db_connection()
+        c = conn.cursor()
+        c.execute('SELECT user_id, delivery_time, genre FROM users')
+        all_users = c.fetchall()
+        conn.close()
+        
+        print(f"\n📋 DATABASE TYPE: {db_type}")
+        print("📋 === ALL USER SETTINGS IN DATABASE ===")
+        if all_users:
+            for user_id, dtime, genre in all_users:
+                print(f"   ✓ User: {user_id[:12]}..., Time: '{dtime}', Genre: {genre}")
+        else:
+            print("   ⚠️  NO USERS FOUND IN DATABASE!")
+        print("=" * 70 + "\n")
+    except Exception as e:
+        print(f"❌ Failed to load users at startup: {e}")
+        import traceback
+        traceback.print_exc()
     
     # 起動時に次の分まで待機
     now = datetime.now(JST)
     wait_seconds = 60 - now.second - (now.microsecond / 1000000.0)
     if wait_seconds > 0:
-        print(f"⏱️ Waiting {wait_seconds:.1f}s to sync with minute boundary...")
+        print(f"⏱️  Waiting {wait_seconds:.1f}s to sync with minute boundary...\n")
         time.sleep(wait_seconds)
     
     last_checked_minute = None
+    check_count = 0
     
     while True:
         try:
@@ -394,31 +418,63 @@ def schedule_checker():
             current_minute_key = now_jst.strftime("%Y%m%d%H%M")
             timestamp = now_jst.strftime("%Y-%m-%d %H:%M:%S")
             
+            check_count += 1
+            
             # 同じ分に複数回実行しないようにチェック
             if current_minute_key != last_checked_minute:
                 last_checked_minute = current_minute_key
                 
-                print(f"⏰ [{timestamp}] Checking scheduled deliveries for {current_time_str}...")
+                print(f"\n{'='*70}")
+                print(f"⏰ CHECK #{check_count} at {timestamp}")
+                print(f"   🔍 Looking for users with delivery_time = '{current_time_str}'")
                 
-                targets = get_users_by_time(current_time_str)
+                # デバッグ: 実際のクエリとDB内容を確認
+                try:
+                    conn, db_type = get_db_connection()
+                    c = conn.cursor()
+                    
+                    # 全ユーザーの時間を取得（デバッグ用）
+                    c.execute('SELECT user_id, delivery_time FROM users')
+                    all_times = c.fetchall()
+                    print(f"   📊 All delivery times in DB:")
+                    for uid, dt in all_times:
+                        match = "✅ MATCH!" if dt == current_time_str else ""
+                        print(f"      - {uid[:12]}...: '{dt}' {match}")
+                    
+                    # ターゲットユーザーを取得
+                    placeholder = '%s' if db_type == 'postgres' else '?'
+                    query = f'SELECT user_id, genre, delivery_time FROM users WHERE delivery_time = {placeholder}'
+                    c.execute(query, (current_time_str,))
+                    targets = c.fetchall()
+                    conn.close()
+                    
+                    print(f"   📬 Query returned {len(targets)} matching user(s)")
+                    
+                    if targets:
+                        print(f"   🎯 DELIVERING TO:")
+                        for user_id, genre, dtime in targets:
+                            print(f"      → User: {user_id[:12]}..., Genre: {genre}")
+                            threading.Thread(target=push_news, args=(user_id, genre), daemon=True).start()
+                        print(f"   ✅ Started {len(targets)} delivery thread(s)")
+                    else:
+                        print(f"   ℹ️  No deliveries scheduled for {current_time_str}")
+                    
+                except Exception as db_error:
+                    print(f"   ❌ Database error during check: {db_error}")
+                    import traceback
+                    traceback.print_exc()
                 
-                if targets:
-                    print(f"📬 [{timestamp}] Found {len(targets)} user(s) to deliver")
-                    for user_id, genre in targets:
-                        print(f"   → User: {user_id}, Genre: {genre}")
-                        threading.Thread(target=push_news, args=(user_id, genre), daemon=True).start()
-                else:
-                    print(f"   No deliveries scheduled for {current_time_str}")
+                print(f"{'='*70}")
             
-            # 次のチェックまで1秒待機（細かくチェック）
+            # 次のチェックまで1秒待機
             time.sleep(1)
             
         except Exception as e:
             error_time = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
-            print(f"❌ [{error_time}] Scheduler error: {e}")
+            print(f"\n❌ [{error_time}] SCHEDULER ERROR: {e}")
             import traceback
             traceback.print_exc()
-            time.sleep(10)  # エラー時は10秒待機
+            time.sleep(10)
 
 # ==========================================
 # Flask Webルート
