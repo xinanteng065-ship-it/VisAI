@@ -375,14 +375,15 @@ def push_news(user_id, category):
 # スケジューラー（改善版）
 # ==========================================
 def schedule_checker():
-    """毎分00秒に正確に実行"""
+    """毎分00秒に正確に実行（改善版）"""
     print("🚀 Scheduler thread started")
     
     # 起動時に次の分まで待機
     now = datetime.now(JST)
-    wait_seconds = 60 - now.second
-    print(f"⏱️ Waiting {wait_seconds}s to sync with minute boundary...")
-    time.sleep(wait_seconds)
+    wait_seconds = 60 - now.second - (now.microsecond / 1000000.0)
+    if wait_seconds > 0:
+        print(f"⏱️ Waiting {wait_seconds:.1f}s to sync with minute boundary...")
+        time.sleep(wait_seconds)
     
     last_checked_minute = None
     
@@ -394,33 +395,30 @@ def schedule_checker():
             timestamp = now_jst.strftime("%Y-%m-%d %H:%M:%S")
             
             # 同じ分に複数回実行しないようにチェック
-            if current_minute_key == last_checked_minute:
-                time.sleep(1)  # 短いスリープで次のループへ
-                continue
+            if current_minute_key != last_checked_minute:
+                last_checked_minute = current_minute_key
+                
+                print(f"⏰ [{timestamp}] Checking scheduled deliveries for {current_time_str}...")
+                
+                targets = get_users_by_time(current_time_str)
+                
+                if targets:
+                    print(f"📬 [{timestamp}] Found {len(targets)} user(s) to deliver")
+                    for user_id, genre in targets:
+                        print(f"   → User: {user_id}, Genre: {genre}")
+                        threading.Thread(target=push_news, args=(user_id, genre), daemon=True).start()
+                else:
+                    print(f"   No deliveries scheduled for {current_time_str}")
             
-            last_checked_minute = current_minute_key
-            
-            print(f"⏰ [{timestamp}] Checking scheduled deliveries for {current_time_str}...")
-            
-            targets = get_users_by_time(current_time_str)
-            
-            if targets:
-                print(f"📬 [{timestamp}] Found {len(targets)} user(s) to deliver")
-                for user_id, genre in targets:
-                    print(f"   → User: {user_id}, Genre: {genre}")
-                    threading.Thread(target=push_news, args=(user_id, genre), daemon=True).start()
-            else:
-                print(f"   No deliveries scheduled for {current_time_str}")
-            
-            # 次の分の00秒まで待機
-            now = datetime.now(JST)
-            wait_seconds = 60 - now.second
-            time.sleep(wait_seconds)
+            # 次のチェックまで1秒待機（細かくチェック）
+            time.sleep(1)
             
         except Exception as e:
             error_time = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
             print(f"❌ [{error_time}] Scheduler error: {e}")
-            time.sleep(60)
+            import traceback
+            traceback.print_exc()
+            time.sleep(10)  # エラー時は10秒待機
 
 # ==========================================
 # Flask Webルート
@@ -864,9 +862,6 @@ def handle_message(event):
 # ==========================================
 init_db()
 
-# スケジューラー起動
-# 【注意】朝の自動配信は「プッシュメッセージ」なので有料枠を消費します。
-# 完全に無料にしたい場合は、下の2行をコメントアウト（#をつける）してください。
 scheduler_thread = threading.Thread(target=schedule_checker, daemon=True)
 scheduler_thread.start()
 
