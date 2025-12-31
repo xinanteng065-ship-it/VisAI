@@ -1,4 +1,5 @@
 import os
+import sqlite3
 import threading
 import feedparser
 import random
@@ -47,102 +48,84 @@ NEWS_CATEGORIES = {
 }
 
 # ==========================================
-# データベース接続（PostgreSQL優先、SQLiteフォールバック）
+# データベース接続（SQLiteのみ - シンプル版）
 # ==========================================
-def get_db_connection():
-    """データベース接続を取得"""
-    if DATABASE_URL:
-        # PostgreSQL（本番環境）
-        import psycopg2
-        from urllib.parse import urlparse
-        
-        url = urlparse(DATABASE_URL)
-        conn = psycopg2.connect(
-            dbname=url.path[1:],
-            user=url.username,
-            password=url.password,
-            host=url.hostname,
-            port=url.port
-        )
-        return conn, 'postgres'
-    else:
-        # SQLite（開発環境）
-        import sqlite3
-        db_path = os.path.join(os.path.dirname(__file__), "users.db")
-        return sqlite3.connect(db_path), 'sqlite'
+DB_PATH = os.path.join(os.path.dirname(__file__), "users.db")
+
+def get_db():
+    """SQLite接続を取得"""
+    return sqlite3.connect(DB_PATH)
 
 # ==========================================
 # データベース初期化
 # ==========================================
 def init_database():
     """テーブルを作成"""
-    conn, db_type = get_db_connection()
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            user_id TEXT PRIMARY KEY,
-            delivery_time TEXT NOT NULL DEFAULT '08:00',
-            genre TEXT NOT NULL DEFAULT 'トップ',
-            delivery_count INTEGER DEFAULT 0,
-            support_shown INTEGER DEFAULT 0
-        )
-    ''')
-    
-    conn.commit()
-    conn.close()
-    print(f"✅ Database initialized ({db_type})")
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                user_id TEXT PRIMARY KEY,
+                delivery_time TEXT NOT NULL DEFAULT '08:00',
+                genre TEXT NOT NULL DEFAULT 'トップ',
+                delivery_count INTEGER DEFAULT 0,
+                support_shown INTEGER DEFAULT 0
+            )
+        ''')
+        
+        conn.commit()
+        conn.close()
+        print("✅ Database initialized (SQLite)")
+    except Exception as e:
+        print(f"❌ Database initialization error: {e}")
 
 # ==========================================
 # ユーザー設定の取得
 # ==========================================
 def get_user_settings(user_id):
     """ユーザー設定を取得（存在しない場合はデフォルト値で作成）"""
-    conn, db_type = get_db_connection()
-    cursor = conn.cursor()
-    
-    placeholder = '%s' if db_type == 'postgres' else '?'
-    cursor.execute(
-        f'SELECT delivery_time, genre, delivery_count, support_shown FROM users WHERE user_id = {placeholder}',
-        (user_id,)
-    )
-    row = cursor.fetchone()
-    
-    if not row:
-        # 新規ユーザーの場合はデフォルト値で作成
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        
         cursor.execute(
-            f'INSERT INTO users (user_id, delivery_time, genre, delivery_count, support_shown) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})',
-            (user_id, '08:00', 'トップ', 0, 0)
+            'SELECT delivery_time, genre, delivery_count, support_shown FROM users WHERE user_id = ?',
+            (user_id,)
         )
-        conn.commit()
-        row = ('08:00', 'トップ', 0, 0)
-    
-    conn.close()
-    
-    return {
-        'time': row[0],
-        'genre': row[1],
-        'delivery_count': row[2],
-        'support_shown': row[3]
-    }
+        row = cursor.fetchone()
+        
+        if not row:
+            # 新規ユーザーの場合はデフォルト値で作成
+            cursor.execute(
+                'INSERT INTO users (user_id, delivery_time, genre, delivery_count, support_shown) VALUES (?, ?, ?, ?, ?)',
+                (user_id, '08:00', 'トップ', 0, 0)
+            )
+            conn.commit()
+            row = ('08:00', 'トップ', 0, 0)
+        
+        conn.close()
+        
+        return {
+            'time': row[0],
+            'genre': row[1],
+            'delivery_count': row[2],
+            'support_shown': row[3]
+        }
+    except Exception as e:
+        print(f"❌ get_user_settings error: {e}")
+        return {'time': '08:00', 'genre': 'トップ', 'delivery_count': 0, 'support_shown': 0}
 
 # ==========================================
 # ユーザー設定の更新
 # ==========================================
 def update_user_settings(user_id, delivery_time, genre):
     """配信時間とジャンルを更新"""
-    conn, db_type = get_db_connection()
-    cursor = conn.cursor()
-    
-    if db_type == 'postgres':
-        cursor.execute('''
-            INSERT INTO users (user_id, delivery_time, genre, delivery_count, support_shown)
-            VALUES (%s, %s, %s, 0, 0)
-            ON CONFLICT(user_id) DO UPDATE SET
-                delivery_time = EXCLUDED.delivery_time,
-                genre = EXCLUDED.genre
-        ''', (user_id, delivery_time, genre))
-    else:
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        
         cursor.execute('''
             INSERT INTO users (user_id, delivery_time, genre, delivery_count, support_shown)
             VALUES (?, ?, ?, 0, 0)
@@ -150,62 +133,71 @@ def update_user_settings(user_id, delivery_time, genre):
                 delivery_time = excluded.delivery_time,
                 genre = excluded.genre
         ''', (user_id, delivery_time, genre))
-    
-    conn.commit()
-    conn.close()
-    print(f"✅ Updated settings: {user_id[:8]}... -> {delivery_time}, {genre}")
+        
+        conn.commit()
+        conn.close()
+        print(f"✅ Updated settings: {user_id[:8]}... -> {delivery_time}, {genre}")
+    except Exception as e:
+        print(f"❌ update_user_settings error: {e}")
 
 # ==========================================
 # 配信回数のカウント
 # ==========================================
 def increment_delivery_count(user_id):
     """配信回数を1増やす"""
-    conn, db_type = get_db_connection()
-    cursor = conn.cursor()
-    
-    placeholder = '%s' if db_type == 'postgres' else '?'
-    cursor.execute(
-        f'UPDATE users SET delivery_count = delivery_count + 1 WHERE user_id = {placeholder}',
-        (user_id,)
-    )
-    
-    conn.commit()
-    conn.close()
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        
+        cursor.execute(
+            'UPDATE users SET delivery_count = delivery_count + 1 WHERE user_id = ?',
+            (user_id,)
+        )
+        
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"❌ increment_delivery_count error: {e}")
 
 # ==========================================
 # 応援メッセージフラグ
 # ==========================================
 def mark_support_shown(user_id):
     """応援メッセージを表示済みにする"""
-    conn, db_type = get_db_connection()
-    cursor = conn.cursor()
-    
-    placeholder = '%s' if db_type == 'postgres' else '?'
-    cursor.execute(
-        f'UPDATE users SET support_shown = 1 WHERE user_id = {placeholder}',
-        (user_id,)
-    )
-    
-    conn.commit()
-    conn.close()
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        
+        cursor.execute(
+            'UPDATE users SET support_shown = 1 WHERE user_id = ?',
+            (user_id,)
+        )
+        
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"❌ mark_support_shown error: {e}")
 
 # ==========================================
 # 指定時刻の配信対象ユーザーを取得
 # ==========================================
 def get_users_for_delivery(target_time):
     """配信時刻が一致するユーザーのリストを返す"""
-    conn, db_type = get_db_connection()
-    cursor = conn.cursor()
-    
-    placeholder = '%s' if db_type == 'postgres' else '?'
-    cursor.execute(
-        f'SELECT user_id, genre FROM users WHERE delivery_time = {placeholder}',
-        (target_time,)
-    )
-    users = cursor.fetchall()
-    
-    conn.close()
-    return users
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        
+        cursor.execute(
+            'SELECT user_id, genre FROM users WHERE delivery_time = ?',
+            (target_time,)
+        )
+        users = cursor.fetchall()
+        
+        conn.close()
+        return users
+    except Exception as e:
+        print(f"❌ get_users_for_delivery error: {e}")
+        return []
 
 # ==========================================
 # ニュース取得
@@ -300,28 +292,32 @@ def analyze_news_with_ai(article, category):
 # ==========================================
 def create_news_message(user_id, category):
     """ニュース本文を作成（配信回数もカウント）"""
-    # ニュースを取得
-    main_article, related_articles = fetch_news(category)
-    
-    if not main_article:
-        return "申し訳ありません。現在ニュースが取得できませんでした。"
-    
-    # AI分析を生成
-    analysis = analyze_news_with_ai(main_article, category)
-    
-    # メッセージを組み立て
-    message = f"{analysis}\n\n🔗 詳細記事はこちら\n{main_article.link}"
-    
-    # 関連ニュースを追加
-    if related_articles:
-        message += "\n\n━━━━━━━━━━━━━━━━\n📰 その他の関連ニュース\n"
-        for i, article in enumerate(related_articles, 1):
-            message += f"\n{i}. {article.title}\n{article.link}\n"
-    
-    # 配信回数をカウント
-    increment_delivery_count(user_id)
-    
-    return message
+    try:
+        # ニュースを取得
+        main_article, related_articles = fetch_news(category)
+        
+        if not main_article:
+            return "申し訳ありません。現在ニュースが取得できませんでした。"
+        
+        # AI分析を生成
+        analysis = analyze_news_with_ai(main_article, category)
+        
+        # メッセージを組み立て
+        message = f"{analysis}\n\n🔗 詳細記事はこちら\n{main_article.link}"
+        
+        # 関連ニュースを追加
+        if related_articles:
+            message += "\n\n━━━━━━━━━━━━━━━━\n📰 その他の関連ニュース\n"
+            for i, article in enumerate(related_articles, 1):
+                message += f"\n{i}. {article.title}\n{article.link}\n"
+        
+        # 配信回数をカウント
+        increment_delivery_count(user_id)
+        
+        return message
+    except Exception as e:
+        print(f"❌ create_news_message error: {e}")
+        return "ニュースの生成中にエラーが発生しました。"
 
 # ==========================================
 # ニュース配信（Push送信）
@@ -359,70 +355,81 @@ def send_news_to_user(user_id, category):
         
     except Exception as e:
         print(f"❌ [{timestamp}] Push error for {user_id[:8]}...: {e}")
+        import traceback
+        traceback.print_exc()
 
 # ==========================================
 # スケジューラーの配信ジョブ
 # ==========================================
 def delivery_job():
     """毎分実行される配信チェック処理"""
-    now = datetime.now(JST)
-    current_time = now.strftime("%H:%M")
-    timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
-    
-    print(f"\n⏰ [{timestamp}] Checking deliveries for {current_time}")
-    
-    # 配信対象ユーザーを取得
-    users = get_users_for_delivery(current_time)
-    
-    if users:
-        print(f"📬 Found {len(users)} user(s) to deliver:")
-        for user_id, genre in users:
-            print(f"   → {user_id[:8]}... ({genre})")
-            # 別スレッドで配信（並列処理）
-            threading.Thread(
-                target=send_news_to_user,
-                args=(user_id, genre),
-                daemon=True
-            ).start()
-    else:
-        print(f"   ℹ️  No deliveries scheduled for {current_time}")
+    try:
+        now = datetime.now(JST)
+        current_time = now.strftime("%H:%M")
+        timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
+        
+        print(f"\n⏰ [{timestamp}] Checking deliveries for {current_time}")
+        
+        # 配信対象ユーザーを取得
+        users = get_users_for_delivery(current_time)
+        
+        if users:
+            print(f"📬 Found {len(users)} user(s) to deliver:")
+            for user_id, genre in users:
+                print(f"   → {user_id[:8]}... ({genre})")
+                # 別スレッドで配信（並列処理）
+                threading.Thread(
+                    target=send_news_to_user,
+                    args=(user_id, genre),
+                    daemon=True
+                ).start()
+        else:
+            print(f"   ℹ️  No deliveries scheduled for {current_time}")
+    except Exception as e:
+        print(f"❌ delivery_job error: {e}")
+        import traceback
+        traceback.print_exc()
 
 # ==========================================
 # スケジューラー起動
 # ==========================================
 def start_scheduler():
     """APSchedulerを起動"""
-    scheduler = BackgroundScheduler(timezone=JST)
-    
-    # 毎分00秒に実行
-    scheduler.add_job(
-        delivery_job,
-        trigger=CronTrigger(minute='*', second='0', timezone=JST),
-        id='news_delivery_job',
-        name='News Delivery Check',
-        misfire_grace_time=30
-    )
-    
-    scheduler.start()
-    print("✅ APScheduler started (runs every minute at :00 seconds)")
-    
-    # 起動時に登録済みユーザーを表示
     try:
-        conn, db_type = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute('SELECT user_id, delivery_time, genre FROM users')
-        all_users = cursor.fetchall()
-        conn.close()
+        scheduler = BackgroundScheduler(timezone=JST)
         
-        print(f"\n📋 Database type: {db_type}")
-        if all_users:
-            print("📋 Registered users:")
-            for uid, dtime, genre in all_users:
-                print(f"   {uid[:8]}... | {dtime} | {genre}")
-        else:
-            print("📋 No users registered yet")
+        # 毎分00秒に実行
+        scheduler.add_job(
+            delivery_job,
+            trigger=CronTrigger(minute='*', second='0', timezone=JST),
+            id='news_delivery_job',
+            name='News Delivery Check',
+            misfire_grace_time=30
+        )
+        
+        scheduler.start()
+        print("✅ APScheduler started (runs every minute at :00 seconds)")
+        
+        # 起動時に登録済みユーザーを表示
+        try:
+            conn = get_db()
+            cursor = conn.cursor()
+            cursor.execute('SELECT user_id, delivery_time, genre FROM users')
+            all_users = cursor.fetchall()
+            conn.close()
+            
+            if all_users:
+                print("\n📋 Registered users:")
+                for uid, dtime, genre in all_users:
+                    print(f"   {uid[:8]}... | {dtime} | {genre}")
+            else:
+                print("\n📋 No users registered yet")
+        except Exception as e:
+            print(f"❌ Failed to load users: {e}")
     except Exception as e:
-        print(f"❌ Failed to load users: {e}")
+        print(f"❌ Scheduler start error: {e}")
+        import traceback
+        traceback.print_exc()
 
 # ==========================================
 # Flask Routes
@@ -435,361 +442,348 @@ def index():
 @app.route("/settings", methods=['GET', 'POST'])
 def settings():
     """設定画面"""
-    user_id = request.args.get('user_id')
-    
-    if not user_id:
-        return """
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>エラー</title>
-            <style>
-                body {
-                    font-family: -apple-system, sans-serif;
-                    background: linear-gradient(135deg, #667eea, #764ba2);
-                    min-height: 100vh;
-                    display: flex;
-                    align-items: center;
-                    justify-content: center;
-                    padding: 20px;
-                }
-                .container {
-                    background: white;
-                    padding: 40px 30px;
-                    border-radius: 16px;
-                    box-shadow: 0 10px 40px rgba(0,0,0,0.2);
-                    text-align: center;
-                    max-width: 400px;
-                }
-                h2 {
-                    color: #e74c3c;
-                    margin-bottom: 15px;
-                }
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <h2>⚠️ エラー</h2>
-                <p>ユーザーIDが見つかりません。<br>LINEから再度アクセスしてください。</p>
-            </div>
-        </body>
-        </html>
-        """, 400
-    
-    if request.method == 'POST':
-        new_time = request.form.get('delivery_time')
-        new_genre = request.form.get('genre')
+    try:
+        user_id = request.args.get('user_id')
         
-        update_user_settings(user_id, new_time, new_genre)
-        
-        return """
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>設定完了</title>
-            <style>
-                body {
-                    font-family: -apple-system, sans-serif;
-                    background: linear-gradient(135deg, #667eea, #764ba2);
-                    min-height: 100vh;
-                    display: flex;
-                    align-items: center;
-                    justify-content: center;
-                    padding: 20px;
-                }
-                .container {
-                    background: white;
-                    padding: 50px 30px;
-                    border-radius: 16px;
-                    box-shadow: 0 10px 40px rgba(0,0,0,0.2);
-                    text-align: center;
-                    max-width: 400px;
-                    animation: slideIn 0.4s ease-out;
-                }
-                @keyframes slideIn {
-                    from {
-                        opacity: 0;
-                        transform: translateY(-20px);
+        if not user_id:
+            return """
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <title>エラー</title>
+                <style>
+                    body {
+                        font-family: -apple-system, sans-serif;
+                        background: linear-gradient(135deg, #667eea, #764ba2);
+                        min-height: 100vh;
+                        display: flex;
+                        align-items: center;
+                        justify-content: center;
+                        padding: 20px;
                     }
-                    to {
+                    .container {
+                        background: white;
+                        padding: 40px 30px;
+                        border-radius: 16px;
+                        box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+                        text-align: center;
+                        max-width: 400px;
+                    }
+                    h2 {
+                        color: #e74c3c;
+                        margin-bottom: 15px;
+                    }
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <h2>⚠️ エラー</h2>
+                    <p>ユーザーIDが見つかりません。<br>LINEから再度アクセスしてください。</p>
+                </div>
+            </body>
+            </html>
+            """, 400
+        
+        if request.method == 'POST':
+            new_time = request.form.get('delivery_time')
+            new_genre = request.form.get('genre')
+            
+            update_user_settings(user_id, new_time, new_genre)
+            
+            return """
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <title>設定完了</title>
+                <style>
+                    body {
+                        font-family: -apple-system, sans-serif;
+                        background: linear-gradient(135deg, #667eea, #764ba2);
+                        min-height: 100vh;
+                        display: flex;
+                        align-items: center;
+                        justify-content: center;
+                        padding: 20px;
+                    }
+                    .container {
+                        background: white;
+                        padding: 50px 30px;
+                        border-radius: 16px;
+                        box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+                        text-align: center;
+                        max-width: 400px;
+                        animation: slideIn 0.4s ease-out;
+                    }
+                    @keyframes slideIn {
+                        from {
+                            opacity: 0;
+                            transform: translateY(-20px);
+                        }
+                        to {
+                            opacity: 1;
+                            transform: translateY(0);
+                        }
+                    }
+                    .success-icon {
+                        width: 80px;
+                        height: 80px;
+                        background: #00B900;
+                        border-radius: 50%;
+                        display: flex;
+                        align-items: center;
+                        justify-content: center;
+                        margin: 0 auto 25px;
+                        font-size: 45px;
+                        color: white;
+                    }
+                    h2 {
+                        color: #333;
+                        margin-bottom: 20px;
+                        font-size: 26px;
+                    }
+                    p {
+                        color: #666;
+                        font-size: 18px;
+                        line-height: 1.8;
+                    }
+                    .back-notice {
+                        margin-top: 30px;
+                        padding: 15px;
+                        background: #f8f9fa;
+                        border-radius: 8px;
+                        color: #555;
+                        font-size: 15px;
+                    }
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <div class="success-icon">✓</div>
+                    <h2>設定を保存しました！</h2>
+                    <p>設定した時間にニュースが届きます。</p>
+                    <div class="back-notice">
+                        LINEの画面に戻ってください
+                    </div>
+                </div>
+            </body>
+            </html>
+            """
+        
+        # GET: 設定フォームを表示
+        current_settings = get_user_settings(user_id)
+        
+        # ジャンル選択のオプションHTML生成
+        genre_options = ''
+        for genre_name in NEWS_CATEGORIES.keys():
+            selected = 'selected' if genre_name == current_settings['genre'] else ''
+            genre_options += f'<option value="{genre_name}" {selected}>{genre_name}</option>'
+        
+        html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>ニュース配信設定 - VisAI</title>
+            <style>
+                * {{
+                    margin: 0;
+                    padding: 0;
+                    box-sizing: border-box;
+                }}
+                body {{
+                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                    min-height: 100vh;
+                    padding: 20px;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                }}
+                .container {{
+                    max-width: 420px;
+                    width: 100%;
+                    background: white;
+                    padding: 35px 30px;
+                    border-radius: 20px;
+                    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+                    animation: fadeIn 0.5s ease-out;
+                }}
+                @keyframes fadeIn {{
+                    from {{
+                        opacity: 0;
+                        transform: translateY(20px);
+                    }}
+                    to {{
                         opacity: 1;
                         transform: translateY(0);
-                    }
-                }
-                .success-icon {
-                    width: 80px;
-                    height: 80px;
-                    background: #00B900;
-                    border-radius: 50%;
+                    }}
+                }}
+                .header {{
+                    text-align: center;
+                    margin-bottom: 30px;
+                }}
+                .header-icon {{
+                    font-size: 48px;
+                    margin-bottom: 10px;
+                }}
+                h2 {{
+                    color: #2c3e50;
+                    font-size: 24px;
+                    font-weight: 600;
+                    margin-bottom: 8px;
+                }}
+                .subtitle {{
+                    color: #7f8c8d;
+                    font-size: 14px;
+                }}
+                .current-settings {{
+                    background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+                    padding: 15px;
+                    border-radius: 12px;
+                    margin-bottom: 25px;
+                    color: white;
+                    font-size: 14px;
+                    text-align: center;
+                }}
+                .current-settings strong {{
+                    font-weight: 600;
+                }}
+                .form-group {{
+                    margin-bottom: 25px;
+                }}
+                label {{
                     display: flex;
                     align-items: center;
-                    justify-content: center;
-                    margin: 0 auto 25px;
-                    font-size: 45px;
-                    color: white;
-                }
-                h2 {
-                    color: #333;
-                    margin-bottom: 20px;
-                    font-size: 26px;
-                }
-                p {
-                    color: #666;
-                    font-size: 18px;
-                    line-height: 1.8;
-                }
-                .back-notice {
-                    margin-top: 30px;
-                    padding: 15px;
-                    background: #f8f9fa;
-                    border-radius: 8px;
-                    color: #555;
+                    gap: 8px;
+                    color: #2c3e50;
+                    font-weight: 600;
                     font-size: 15px;
-                }
+                    margin-bottom: 10px;
+                }}
+                .label-icon {{
+                    font-size: 18px;
+                }}
+                input[type="time"],
+                select {{
+                    width: 100%;
+                    padding: 14px 16px;
+                    font-size: 16px;
+                    border: 2px solid #e0e0e0;
+                    border-radius: 12px;
+                    background-color: #f8f9fa;
+                    transition: all 0.3s ease;
+                    font-family: inherit;
+                }}
+                input[type="time"]:focus,
+                select:focus {{
+                    outline: none;
+                    border-color: #667eea;
+                    background-color: white;
+                    box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+                }}
+                select {{
+                    cursor: pointer;
+                    appearance: none;
+                    background-image: url("data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3e%3cpolyline points='6 9 12 15 18 9'%3e%3c/polyline%3e%3c/svg%3e");
+                    background-repeat: no-repeat;
+                    background-position: right 12px center;
+                    background-size: 20px;
+                    padding-right: 40px;
+                }}
+                button {{
+                    width: 100%;
+                    padding: 16px;
+                    background: linear-gradient(135deg, #00B900 0%, #00a000 100%);
+                    color: white;
+                    border: none;
+                    border-radius: 12px;
+                    font-size: 17px;
+                    font-weight: 600;
+                    cursor: pointer;
+                    transition: all 0.3s ease;
+                    box-shadow: 0 4px 15px rgba(0, 185, 0, 0.3);
+                    margin-top: 10px;
+                }}
+                button:hover {{
+                    background: linear-gradient(135deg, #00a000 0%, #008f00 100%);
+                    transform: translateY(-2px);
+                    box-shadow: 0 6px 20px rgba(0, 185, 0, 0.4);
+                }}
+                button:active {{
+                    transform: translateY(0);
+                }}
+                .divider {{
+                    height: 1px;
+                    background: linear-gradient(to right, transparent, #e0e0e0, transparent);
+                    margin: 25px 0;
+                }}
             </style>
         </head>
         <body>
             <div class="container">
-                <div class="success-icon">✓</div>
-                <h2>設定を保存しました！</h2>
-                <p>設定した時間にニュースが届きます。</p>
-                <div class="back-notice">
-                    LINEの画面に戻ってください
+                <div class="header">
+                    <div class="header-icon">⚙️</div>
+                    <h2>配信設定</h2>
+                    <p class="subtitle">お好みの時間とジャンルを設定できます</p>
                 </div>
+                <div class="current-settings">
+                    現在の設定: <strong>{current_settings['time']}</strong> に <strong>{current_settings['genre']}</strong>ニュース
+                </div>
+                <form method="POST">
+                    <div class="form-group">
+                        <label>
+                            <span class="label-icon">🕐</span>
+                            配信時間
+                        </label>
+                        <input type="time" name="delivery_time" value="{current_settings['time']}" required>
+                    </div>
+                    <div class="divider"></div>
+                    <div class="form-group">
+                        <label>
+                            <span class="label-icon">📰</span>
+                            ニュースジャンル
+                        </label>
+                        <select name="genre">
+                            {genre_options}
+                        </select>
+                    </div>
+                    <button type="submit">💾 設定を保存する</button>
+                </form>
             </div>
         </body>
         </html>
         """
+        
+        return render_template_string(html)
     
-    # GET: 設定フォームを表示
-    current_settings = get_user_settings(user_id)
-    
-    # ジャンル選択のオプションHTML生成
-    genre_options = ''
-    for genre_name in NEWS_CATEGORIES.keys():
-        selected = 'selected' if genre_name == current_settings['genre'] else ''
-        genre_options += f'<option value="{genre_name}" {selected}>{genre_name}</option>'
-    
-    html = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>ニュース配信設定 - VisAI</title>
-        <style>
-            * {{
-                margin: 0;
-                padding: 0;
-                box-sizing: border-box;
-            }}
-            
-            body {{
-                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                min-height: 100vh;
-                padding: 20px;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-            }}
-            
-            .container {{
-                max-width: 420px;
-                width: 100%;
-                background: white;
-                padding: 35px 30px;
-                border-radius: 20px;
-                box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
-                animation: fadeIn 0.5s ease-out;
-            }}
-            
-            @keyframes fadeIn {{
-                from {{
-                    opacity: 0;
-                    transform: translateY(20px);
-                }}
-                to {{
-                    opacity: 1;
-                    transform: translateY(0);
-                }}
-            }}
-            
-            .header {{
-                text-align: center;
-                margin-bottom: 30px;
-            }}
-            
-            .header-icon {{
-                font-size: 48px;
-                margin-bottom: 10px;
-            }}
-            
-            h2 {{
-                color: #2c3e50;
-                font-size: 24px;
-                font-weight: 600;
-                margin-bottom: 8px;
-            }}
-            
-            .subtitle {{
-                color: #7f8c8d;
-                font-size: 14px;
-            }}
-            
-            .current-settings {{
-                background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
-                padding: 15px;
-                border-radius: 12px;
-                margin-bottom: 25px;
-                color: white;
-                font-size: 14px;
-                text-align: center;
-            }}
-            
-            .current-settings strong {{
-                font-weight: 600;
-            }}
-            
-            .form-group {{
-                margin-bottom: 25px;
-            }}
-            
-            label {{
-                display: flex;
-                align-items: center;
-                gap: 8px;
-                color: #2c3e50;
-                font-weight: 600;
-                font-size: 15px;
-                margin-bottom: 10px;
-            }}
-            
-            .label-icon {{
-                font-size: 18px;
-            }}
-            
-            input[type="time"],
-            select {{
-                width: 100%;
-                padding: 14px 16px;
-                font-size: 16px;
-                border: 2px solid #e0e0e0;
-                border-radius: 12px;
-                background-color: #f8f9fa;
-                transition: all 0.3s ease;
-                font-family: inherit;
-            }}
-            
-            input[type="time"]:focus,
-            select:focus {{
-                outline: none;
-                border-color: #667eea;
-                background-color: white;
-                box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
-            }}
-            
-            select {{
-                cursor: pointer;
-                appearance: none;
-                background-image: url("data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3e%3cpolyline points='6 9 12 15 18 9'%3e%3c/polyline%3e%3c/svg%3e");
-                background-repeat: no-repeat;
-                background-position: right 12px center;
-                background-size: 20px;
-                padding-right: 40px;
-            }}
-            
-            button {{
-                width: 100%;
-                padding: 16px;
-                background: linear-gradient(135deg, #00B900 0%, #00a000 100%);
-                color: white;
-                border: none;
-                border-radius: 12px;
-                font-size: 17px;
-                font-weight: 600;
-                cursor: pointer;
-                transition: all 0.3s ease;
-                box-shadow: 0 4px 15px rgba(0, 185, 0, 0.3);
-                margin-top: 10px;
-            }}
-            
-            button:hover {{
-                background: linear-gradient(135deg, #00a000 0%, #008f00 100%);
-                transform: translateY(-2px);
-                box-shadow: 0 6px 20px rgba(0, 185, 0, 0.4);
-            }}
-            
-            button:active {{
-                transform: translateY(0);
-            }}
-            
-            .divider {{
-                height: 1px;
-                background: linear-gradient(to right, transparent, #e0e0e0, transparent);
-                margin: 25px 0;
-            }}
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <div class="header">
-                <div class="header-icon">⚙️</div>
-                <h2>配信設定</h2>
-                <p class="subtitle">お好みの時間とジャンルを設定できます</p>
-            </div>
-            
-            <div class="current-settings">
-                現在の設定: <strong>{current_settings['time']}</strong> に <strong>{current_settings['genre']}</strong>ニュース
-            </div>
-            
-            <form method="POST">
-                <div class="form-group">
-                    <label>
-                        <span class="label-icon">🕐</span>
-                        配信時間
-                    </label>
-                    <input type="time" name="delivery_time" value="{current_settings['time']}" required>
-                </div>
-                
-                <div class="divider"></div>
-                
-                <div class="form-group">
-                    <label>
-                        <span class="label-icon">📰</span>
-                        ニュースジャンル
-                    </label>
-                    <select name="genre">
-                        {genre_options}
-                    </select>
-                </div>
-                
-                <button type="submit">💾 設定を保存する</button>
-            </form>
-        </div>
-    </body>
-    </html>
-    """
-    
-    return render_template_string(html)
+    except Exception as e:
+        print(f"❌ Settings page error: {e}")
+        import traceback
+        traceback.print_exc()
+        return f"Internal Server Error: {str(e)}", 500
 
 @app.route("/callback", methods=['POST'])
 def callback():
     """LINE Webhook"""
-    signature = request.headers.get("X-Line-Signature")
-    body = request.get_data(as_text=True)
-    
     try:
+        signature = request.headers.get("X-Line-Signature")
+        body = request.get_data(as_text=True)
+        
         webhook_handler.handle(body, signature)
+        return "OK"
     except InvalidSignatureError:
         print(f"❌ Invalid signature")
         abort(400)
-    
-    return "OK"
+    except Exception as e:
+        print(f"❌ Callback error: {e}")
+        import traceback
+        traceback.print_exc()
+        return "OK"
 
 # ==========================================
 # LINE メッセージハンドラー
@@ -797,65 +791,71 @@ def callback():
 @webhook_handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     """LINEメッセージを受信したときの処理"""
-    user_id = event.source.user_id
-    text = event.message.text.strip()
-    timestamp = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
-    
-    print(f"💬 [{timestamp}] Message from {user_id[:8]}...: '{text}'")
-    
-    # 「今すぐ」コマンド（Reply使用で無料）
-    if text == "今すぐ":
-        settings = get_user_settings(user_id)
-        print(f"🚀 [{timestamp}] Immediate delivery requested by {user_id[:8]}...")
+    try:
+        user_id = event.source.user_id
+        text = event.message.text.strip()
+        timestamp = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
         
-        # ニュース本文を生成（同期処理）
-        news_content = create_news_message(user_id, settings['genre'])
+        print(f"💬 [{timestamp}] Message from {user_id[:8]}...: '{text}'")
         
-        # 返信メッセージリスト
-        reply_messages = [TextSendMessage(text=news_content)]
+        # 「今すぐ」コマンド（Reply使用で無料）
+        if text == "今すぐ":
+            settings = get_user_settings(user_id)
+            print(f"🚀 [{timestamp}] Immediate delivery requested by {user_id[:8]}...")
+            
+            # ニュース本文を生成（同期処理）
+            news_content = create_news_message(user_id, settings['genre'])
+            
+            # 返信メッセージリスト
+            reply_messages = [TextSendMessage(text=news_content)]
+            
+            # 応援メッセージが必要な場合は追加
+            if settings['delivery_count'] >= 6 and settings['support_shown'] == 0:
+                support_message = (
+                    "いつもVisAIを使ってくれてありがとうございます！🙏\n\n"
+                    "このbotは中学生の個人開発で、サーバー代やAIの利用料を自腹で運営しています。\n\n"
+                    "もし応援してもいいかなと思ってもらえたら、100円の応援PDFをBoothに置いています。\n"
+                    "無理はしないでください🙏\n\n"
+                    f"↓応援はこちらから\n{BOOTH_SUPPORT_URL}"
+                )
+                reply_messages.append(TextSendMessage(text=support_message))
+                mark_support_shown(user_id)
+                print(f"💝 [{timestamp}] Support message added")
+            
+            # Reply送信（無料）
+            line_bot_api.reply_message(event.reply_token, reply_messages)
+            print(f"✅ [{timestamp}] Replied to {user_id[:8]}... (Free)")
+            return
         
-        # 応援メッセージが必要な場合は追加
-        if settings['delivery_count'] >= 6 and settings['support_shown'] == 0:
-            support_message = (
-                "いつもVisAIを使ってくれてありがとうございます！🙏\n\n"
-                "このbotは中学生の個人開発で、サーバー代やAIの利用料を自腹で運営しています。\n\n"
-                "もし応援してもいいかなと思ってもらえたら、100円の応援PDFをBoothに置いています。\n"
-                "無理はしないでください🙏\n\n"
-                f"↓応援はこちらから\n{BOOTH_SUPPORT_URL}"
+        # 「設定」コマンド
+        if text == "設定":
+            settings_url = f"{APP_PUBLIC_URL}/settings?user_id={user_id}"
+            
+            reply_text = (
+                "⚙️ 設定\n"
+                "以下のリンクから配信時間とジャンルを変更できます。\n\n"
+                f"{settings_url}\n\n"
+                "※リンクを知っている人は誰でも設定を変更できてしまうため、他人に教えないでください。"
             )
-            reply_messages.append(TextSendMessage(text=support_message))
-            mark_support_shown(user_id)
-            print(f"💝 [{timestamp}] Support message added")
+            
+            line_bot_api.reply_message(
+                event.reply_token,
+                TextSendMessage(text=reply_text)
+            )
+            print(f"⚙️ [{timestamp}] Settings link sent to {user_id[:8]}...")
+            return
         
-        # Reply送信（無料）
-        line_bot_api.reply_message(event.reply_token, reply_messages)
-        print(f"✅ [{timestamp}] Replied to {user_id[:8]}... (Free)")
-        return
-    
-    # 「設定」コマンド
-    if text == "設定":
-        settings_url = f"{APP_PUBLIC_URL}/settings?user_id={user_id}"
-        
-        reply_text = (
-            "⚙️ 設定\n"
-            "以下のリンクから配信時間とジャンルを変更できます。\n\n"
-            f"{settings_url}\n\n"
-            "※リンクを知っている人は誰でも設定を変更できてしまうため、他人に教えないでください。"
-        )
-        
+        # その他のメッセージ：メニューを表示
         line_bot_api.reply_message(
             event.reply_token,
-            TextSendMessage(text=reply_text)
+            TextSendMessage(text="💡メニュー\n・「今すぐ」: 今すぐニュースを受信(無料)\n・「設定」: 時間やジャンルを変更")
         )
-        print(f"⚙️ [{timestamp}] Settings link sent to {user_id[:8]}...")
-        return
-    
-    # その他のメッセージ：メニューを表示
-    line_bot_api.reply_message(
-        event.reply_token,
-        TextSendMessage(text="💡メニュー\n・「今すぐ」: 今すぐニュースを受信(無料)\n・「設定」: 時間やジャンルを変更")
-    )
-    print(f"ℹ️ [{timestamp}] Help menu sent to {user_id[:8]}...")
+        print(f"ℹ️ [{timestamp}] Help menu sent to {user_id[:8]}...")
+        
+    except Exception as e:
+        print(f"❌ handle_message error: {e}")
+        import traceback
+        traceback.print_exc()
 
 # ==========================================
 # アプリ起動処理
