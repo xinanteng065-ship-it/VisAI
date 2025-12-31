@@ -1,47 +1,42 @@
 import os
-import sqlite3
 import threading
-import time
 import feedparser
 import random
 from datetime import datetime
 from pytz import timezone
-from flask import Flask, request, abort, render_template_string, url_for
+from flask import Flask, request, abort, render_template_string
 
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage
 from openai import OpenAI
 
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
+
 app = Flask(__name__)
 
 # ==========================================
-# 設定・定数
+# 環境変数の読み込み
 # ==========================================
-
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-
+DATABASE_URL = os.environ.get("DATABASE_URL")
 APP_PUBLIC_URL = os.environ.get("APP_PUBLIC_URL", "https://visai.onrender.com")
 BOOTH_SUPPORT_URL = "https://visai.booth.pm/items/7763380"
 
-# 🔧 PostgreSQL接続情報（Renderの永続DB用）
-DATABASE_URL = os.environ.get("DATABASE_URL")
-
 if not all([LINE_CHANNEL_ACCESS_TOKEN, LINE_CHANNEL_SECRET, OPENAI_API_KEY]):
-    print("🚨 必要な環境変数が設定されていません。")
+    raise ValueError("🚨 必要な環境変数が設定されていません")
 
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
-web_hook_handler = WebhookHandler(LINE_CHANNEL_SECRET)
-client = OpenAI(api_key=OPENAI_API_KEY)
-
-# SQLite用のパス（PostgreSQLが使えない場合のフォールバック）
-DB_PATH = os.path.join(os.path.dirname(__file__), "user_settings.db")
+webhook_handler = WebhookHandler(LINE_CHANNEL_SECRET)
+openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
 JST = timezone('Asia/Tokyo')
 
-RSS_URL = {
+# ニュースカテゴリー
+NEWS_CATEGORIES = {
     "トップ": "https://news.yahoo.co.jp/rss/topics/top-picks.xml",
     "社会": "https://news.yahoo.co.jp/rss/topics/domestic.xml",
     "国際": "https://news.yahoo.co.jp/rss/topics/world.xml",
@@ -52,210 +47,203 @@ RSS_URL = {
 }
 
 # ==========================================
-# データベース接続管理
+# データベース接続（PostgreSQL優先、SQLiteフォールバック）
 # ==========================================
 def get_db_connection():
-    """PostgreSQLまたはSQLiteへの接続を返す"""
+    """データベース接続を取得"""
     if DATABASE_URL:
-        # PostgreSQLを使用（本番環境）
+        # PostgreSQL（本番環境）
         import psycopg2
         from urllib.parse import urlparse
         
-        result = urlparse(DATABASE_URL)
+        url = urlparse(DATABASE_URL)
         conn = psycopg2.connect(
-            dbname=result.path[1:],
-            user=result.username,
-            password=result.password,
-            host=result.hostname,
-            port=result.port
+            dbname=url.path[1:],
+            user=url.username,
+            password=url.password,
+            host=url.hostname,
+            port=url.port
         )
         return conn, 'postgres'
     else:
-        # SQLiteを使用（開発環境）
-        conn = sqlite3.connect(DB_PATH)
-        return conn, 'sqlite'
+        # SQLite（開発環境）
+        import sqlite3
+        db_path = os.path.join(os.path.dirname(__file__), "users.db")
+        return sqlite3.connect(db_path), 'sqlite'
 
 # ==========================================
-# データベース関連
+# データベース初期化
 # ==========================================
-def init_db():
-    """データベースの初期化"""
-    try:
-        conn, db_type = get_db_connection()
-        c = conn.cursor()
-        
-        if db_type == 'postgres':
-            c.execute('''
-                CREATE TABLE IF NOT EXISTS users (
-                    user_id TEXT PRIMARY KEY,
-                    delivery_time TEXT DEFAULT '08:00',
-                    genre TEXT DEFAULT 'トップ',
-                    delivery_count INTEGER DEFAULT 0,
-                    support_message_shown INTEGER DEFAULT 0
-                )
-            ''')
-        else:
-            c.execute('''
-                CREATE TABLE IF NOT EXISTS users (
-                    user_id TEXT PRIMARY KEY,
-                    delivery_time TEXT DEFAULT '08:00',
-                    genre TEXT DEFAULT 'トップ',
-                    delivery_count INTEGER DEFAULT 0,
-                    support_message_shown INTEGER DEFAULT 0
-                )
-            ''')
-        
-        conn.commit()
-        conn.close()
-        print(f"✅ Database initialized ({db_type})")
-    except Exception as e:
-        print(f"❌ Database initialization error: {e}")
+def init_database():
+    """テーブルを作成"""
+    conn, db_type = get_db_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            user_id TEXT PRIMARY KEY,
+            delivery_time TEXT NOT NULL DEFAULT '08:00',
+            genre TEXT NOT NULL DEFAULT 'トップ',
+            delivery_count INTEGER DEFAULT 0,
+            support_shown INTEGER DEFAULT 0
+        )
+    ''')
+    
+    conn.commit()
+    conn.close()
+    print(f"✅ Database initialized ({db_type})")
 
+# ==========================================
+# ユーザー設定の取得
+# ==========================================
 def get_user_settings(user_id):
-    """ユーザー設定を取得"""
-    try:
-        conn, db_type = get_db_connection()
-        c = conn.cursor()
-        c.execute('SELECT delivery_time, genre, delivery_count, support_message_shown FROM users WHERE user_id = %s' if db_type == 'postgres' else 'SELECT delivery_time, genre, delivery_count, support_message_shown FROM users WHERE user_id = ?', (user_id,))
-        res = c.fetchone()
-        
-        if res is None:
-            if db_type == 'postgres':
-                c.execute('INSERT INTO users (user_id, delivery_time, genre, delivery_count, support_message_shown) VALUES (%s, %s, %s, %s, %s)', 
-                         (user_id, '08:00', 'トップ', 0, 0))
-            else:
-                c.execute('INSERT INTO users (user_id, delivery_time, genre, delivery_count, support_message_shown) VALUES (?, ?, ?, ?, ?)', 
-                         (user_id, '08:00', 'トップ', 0, 0))
-            conn.commit()
-            res = ('08:00', 'トップ', 0, 0)
-        
-        conn.close()
-        return {
-            "time": res[0], 
-            "genre": res[1],
-            "delivery_count": res[2],
-            "support_message_shown": res[3]
-        }
-    except Exception as e:
-        print(f"❌ get_user_settings error for user {user_id}: {e}")
-        return {"time": "08:00", "genre": "トップ", "delivery_count": 0, "support_message_shown": 0}
+    """ユーザー設定を取得（存在しない場合はデフォルト値で作成）"""
+    conn, db_type = get_db_connection()
+    cursor = conn.cursor()
+    
+    placeholder = '%s' if db_type == 'postgres' else '?'
+    cursor.execute(
+        f'SELECT delivery_time, genre, delivery_count, support_shown FROM users WHERE user_id = {placeholder}',
+        (user_id,)
+    )
+    row = cursor.fetchone()
+    
+    if not row:
+        # 新規ユーザーの場合はデフォルト値で作成
+        cursor.execute(
+            f'INSERT INTO users (user_id, delivery_time, genre, delivery_count, support_shown) VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})',
+            (user_id, '08:00', 'トップ', 0, 0)
+        )
+        conn.commit()
+        row = ('08:00', 'トップ', 0, 0)
+    
+    conn.close()
+    
+    return {
+        'time': row[0],
+        'genre': row[1],
+        'delivery_count': row[2],
+        'support_shown': row[3]
+    }
 
+# ==========================================
+# ユーザー設定の更新
+# ==========================================
 def update_user_settings(user_id, delivery_time, genre):
-    """ユーザー設定を更新"""
-    try:
-        conn, db_type = get_db_connection()
-        c = conn.cursor()
-        
-        print(f"🔧 Updating settings for {user_id}: time={delivery_time}, genre={genre}, db_type={db_type}")
-        
-        if db_type == 'postgres':
-            c.execute('''
-                INSERT INTO users (user_id, delivery_time, genre, delivery_count, support_message_shown) 
-                VALUES (%s, %s, %s, 0, 0)
-                ON CONFLICT(user_id) DO UPDATE SET 
-                    delivery_time=EXCLUDED.delivery_time, 
-                    genre=EXCLUDED.genre
-            ''', (user_id, delivery_time, genre))
-        else:
-            c.execute('''
-                INSERT INTO users (user_id, delivery_time, genre, delivery_count, support_message_shown) 
-                VALUES (?, ?, ?, 0, 0)
-                ON CONFLICT(user_id) DO UPDATE SET 
-                    delivery_time=excluded.delivery_time, 
-                    genre=excluded.genre
-            ''', (user_id, delivery_time, genre))
-        
-        conn.commit()
-        
-        # 確認のため更新後の値を取得
-        placeholder = '%s' if db_type == 'postgres' else '?'
-        c.execute(f'SELECT delivery_time, genre FROM users WHERE user_id = {placeholder}', (user_id,))
-        result = c.fetchone()
-        print(f"✅ Verified settings for {user_id}: {result}")
-        
-        conn.close()
-    except Exception as e:
-        print(f"❌ update_user_settings error for user {user_id}: {e}")
-        import traceback
-        traceback.print_exc()
+    """配信時間とジャンルを更新"""
+    conn, db_type = get_db_connection()
+    cursor = conn.cursor()
+    
+    if db_type == 'postgres':
+        cursor.execute('''
+            INSERT INTO users (user_id, delivery_time, genre, delivery_count, support_shown)
+            VALUES (%s, %s, %s, 0, 0)
+            ON CONFLICT(user_id) DO UPDATE SET
+                delivery_time = EXCLUDED.delivery_time,
+                genre = EXCLUDED.genre
+        ''', (user_id, delivery_time, genre))
+    else:
+        cursor.execute('''
+            INSERT INTO users (user_id, delivery_time, genre, delivery_count, support_shown)
+            VALUES (?, ?, ?, 0, 0)
+            ON CONFLICT(user_id) DO UPDATE SET
+                delivery_time = excluded.delivery_time,
+                genre = excluded.genre
+        ''', (user_id, delivery_time, genre))
+    
+    conn.commit()
+    conn.close()
+    print(f"✅ Updated settings: {user_id[:8]}... -> {delivery_time}, {genre}")
 
+# ==========================================
+# 配信回数のカウント
+# ==========================================
 def increment_delivery_count(user_id):
-    """配信回数をインクリメント"""
-    try:
-        conn, db_type = get_db_connection()
-        c = conn.cursor()
-        
-        placeholder = '%s' if db_type == 'postgres' else '?'
-        c.execute(f'UPDATE users SET delivery_count = delivery_count + 1 WHERE user_id = {placeholder}', (user_id,))
-        
-        conn.commit()
-        conn.close()
-        print(f"✅ Incremented delivery count for {user_id}")
-    except Exception as e:
-        print(f"❌ increment_delivery_count error for user {user_id}: {e}")
-
-def mark_support_message_shown(user_id):
-    """応援メッセージ表示済みフラグを立てる"""
-    try:
-        conn, db_type = get_db_connection()
-        c = conn.cursor()
-        
-        placeholder = '%s' if db_type == 'postgres' else '?'
-        c.execute(f'UPDATE users SET support_message_shown = 1 WHERE user_id = {placeholder}', (user_id,))
-        
-        conn.commit()
-        conn.close()
-        print(f"✅ Marked support message as shown for {user_id}")
-    except Exception as e:
-        print(f"❌ mark_support_message_shown error for user {user_id}: {e}")
-
-def get_users_by_time(target_time):
-    """指定した時間に配信すべきユーザーリストを取得"""
-    try:
-        conn, db_type = get_db_connection()
-        c = conn.cursor()
-        
-        placeholder = '%s' if db_type == 'postgres' else '?'
-        c.execute(f'SELECT user_id, genre FROM users WHERE delivery_time = {placeholder}', (target_time,))
-        users = c.fetchall()
-        
-        conn.close()
-        return users
-    except Exception as e:
-        print(f"❌ get_users_by_time error for time {target_time}: {e}")
-        return []
+    """配信回数を1増やす"""
+    conn, db_type = get_db_connection()
+    cursor = conn.cursor()
+    
+    placeholder = '%s' if db_type == 'postgres' else '?'
+    cursor.execute(
+        f'UPDATE users SET delivery_count = delivery_count + 1 WHERE user_id = {placeholder}',
+        (user_id,)
+    )
+    
+    conn.commit()
+    conn.close()
 
 # ==========================================
-# ニュース取得・AI深掘り分析・本文生成
+# 応援メッセージフラグ
 # ==========================================
-def get_random_news_and_related(category):
-    """指定カテゴリーからランダムに1件のニュースと関連ニュース5件を取得"""
-    if category not in RSS_URL:
-        category = "トップ"
+def mark_support_shown(user_id):
+    """応援メッセージを表示済みにする"""
+    conn, db_type = get_db_connection()
+    cursor = conn.cursor()
     
-    feed = feedparser.parse(RSS_URL[category])
+    placeholder = '%s' if db_type == 'postgres' else '?'
+    cursor.execute(
+        f'UPDATE users SET support_shown = 1 WHERE user_id = {placeholder}',
+        (user_id,)
+    )
     
-    if not feed.entries:
+    conn.commit()
+    conn.close()
+
+# ==========================================
+# 指定時刻の配信対象ユーザーを取得
+# ==========================================
+def get_users_for_delivery(target_time):
+    """配信時刻が一致するユーザーのリストを返す"""
+    conn, db_type = get_db_connection()
+    cursor = conn.cursor()
+    
+    placeholder = '%s' if db_type == 'postgres' else '?'
+    cursor.execute(
+        f'SELECT user_id, genre FROM users WHERE delivery_time = {placeholder}',
+        (target_time,)
+    )
+    users = cursor.fetchall()
+    
+    conn.close()
+    return users
+
+# ==========================================
+# ニュース取得
+# ==========================================
+def fetch_news(category):
+    """指定カテゴリーのニュースをランダムに1件＋関連5件取得"""
+    url = NEWS_CATEGORIES.get(category, NEWS_CATEGORIES["トップ"])
+    
+    try:
+        feed = feedparser.parse(url)
+        
+        if not feed.entries:
+            return None, []
+        
+        # メイン記事をランダムに1件選択
+        main_article = random.choice(feed.entries[:10])
+        
+        # 関連ニュースとして残りから5件取得（重複を除く）
+        related_articles = [e for e in feed.entries if e.link != main_article.link][:5]
+        
+        return main_article, related_articles
+        
+    except Exception as e:
+        print(f"❌ RSS fetch error: {e}")
         return None, []
-    
-    # ランダムに1件選択
-    main_article = random.choice(feed.entries[:10])
-    
-    # 関連ニュースとして残りの記事から5件取得（重複を除く）
-    related_articles = [entry for entry in feed.entries if entry.link != main_article.link][:5]
-    
-    return main_article, related_articles
 
-def generate_deep_dive_summary(article, category):
-    """選択されたニュースを深掘り分析"""
+# ==========================================
+# AI深掘り分析
+# ==========================================
+def analyze_news_with_ai(article, category):
+    """AIでニュースを深掘り分析"""
     system_prompt = (
         "あなたは中立公正で信頼されるニュース解説アナリストです。"
         "1つのニュースを深く掘り下げ、多角的な視点から分析し、"
         "中学生でも理解しやすい文章で解説してください。"
     )
     
-    user_prompt = f"""
-以下のニュース記事について、深掘り分析を行ってください。
+    user_prompt = f"""以下のニュース記事について、深掘り分析を行ってください。
 
 ### 記事情報:
 タイトル: {article.title}
@@ -292,67 +280,68 @@ def generate_deep_dive_summary(article, category):
 """
 
     try:
-        response = client.chat.completions.create(
-            model="gpt-5-nano",
+        response = openai_client.chat.completions.create(
+            model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            max_tokens=550,
+            max_tokens=600,
             temperature=0.7
         )
         return response.choices[0].message.content.strip()
+        
     except Exception as e:
         print(f"❌ OpenAI API Error: {e}")
         return "申し訳ありません。AIによる分析の生成に失敗しました。"
 
-def create_news_content(user_id, category):
-    """ニュースの本文を作成して返す（送信はしない・共通処理）"""
-    try:
-        # ランダムに1件のメインニュースと関連ニュース5件を取得
-        main_article, related_articles = get_random_news_and_related(category)
-        
-        if not main_article:
-            return "申し訳ありません。現在ニュースが取得できませんでした。"
+# ==========================================
+# ニュースメッセージ作成
+# ==========================================
+def create_news_message(user_id, category):
+    """ニュース本文を作成（配信回数もカウント）"""
+    # ニュースを取得
+    main_article, related_articles = fetch_news(category)
+    
+    if not main_article:
+        return "申し訳ありません。現在ニュースが取得できませんでした。"
+    
+    # AI分析を生成
+    analysis = analyze_news_with_ai(main_article, category)
+    
+    # メッセージを組み立て
+    message = f"{analysis}\n\n🔗 詳細記事はこちら\n{main_article.link}"
+    
+    # 関連ニュースを追加
+    if related_articles:
+        message += "\n\n━━━━━━━━━━━━━━━━\n📰 その他の関連ニュース\n"
+        for i, article in enumerate(related_articles, 1):
+            message += f"\n{i}. {article.title}\n{article.link}\n"
+    
+    # 配信回数をカウント
+    increment_delivery_count(user_id)
+    
+    return message
 
-        # メイン記事の深掘り分析を生成
-        deep_dive_summary = generate_deep_dive_summary(main_article, category)
-
-        # メイン記事のリンク
-        main_link_text = f"\n\n🔗 詳細記事はこちら\n{main_article.link}"
-
-        # 関連ニュースのリンク
-        related_links_text = "\n\n━━━━━━━━━━━━━━━━\n📰 その他の関連ニュース\n"
-        for i, entry in enumerate(related_articles, 1):
-            related_links_text += f"\n{i}. {entry.title}\n{entry.link}\n"
-
-        # 最終メッセージの組み立て
-        final_message = f"{deep_dive_summary}{main_link_text}{related_links_text}"
-        
-        # 配信回数をインクリメント（見た回数としてカウント）
-        increment_delivery_count(user_id)
-        
-        return final_message
-
-    except Exception as e:
-        print(f"❌ Error generating content: {e}")
-        return "ニュースの生成中にエラーが発生しました。"
-
-def push_news(user_id, category):
-    """【スケジューラー用】指定ユーザーにニュースをプッシュ送信する（有料枠消費）"""
+# ==========================================
+# ニュース配信（Push送信）
+# ==========================================
+def send_news_to_user(user_id, category):
+    """ユーザーにニュースをPush送信"""
     timestamp = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
-    print(f"📤 [{timestamp}] Start pushing deep-dive news to {user_id} (Genre: {category})")
     
     try:
+        print(f"📤 [{timestamp}] Sending news to {user_id[:8]}... (Genre: {category})")
+        
         # ニュース本文を作成
-        content = create_news_content(user_id, category)
+        news_content = create_news_message(user_id, category)
         
-        # メッセージオブジェクトのリスト作成
-        messages = [TextSendMessage(text=content)]
+        # 送信するメッセージリスト
+        messages = [TextSendMessage(text=news_content)]
         
-        # 応援メッセージが必要か確認
+        # 応援メッセージが必要かチェック
         settings = get_user_settings(user_id)
-        if settings['delivery_count'] >= 6 and settings['support_message_shown'] == 0:
+        if settings['delivery_count'] >= 6 and settings['support_shown'] == 0:
             support_message = (
                 "いつもVisAIを使ってくれてありがとうございます！🙏\n\n"
                 "このbotは中学生の個人開発で、サーバー代やAIの利用料を自腹で運営しています。\n\n"
@@ -361,168 +350,122 @@ def push_news(user_id, category):
                 f"↓応援はこちらから\n{BOOTH_SUPPORT_URL}"
             )
             messages.append(TextSendMessage(text=support_message))
-            mark_support_message_shown(user_id)
-            print(f"💝 [{timestamp}] Support message appended for {user_id}")
-
-        # 送信（Push）
+            mark_support_shown(user_id)
+            print(f"💝 [{timestamp}] Support message added for {user_id[:8]}...")
+        
+        # Push送信
         line_bot_api.push_message(user_id, messages)
-        print(f"✅ [{timestamp}] Successfully sent deep-dive news to {user_id}")
+        print(f"✅ [{timestamp}] Successfully sent to {user_id[:8]}...")
         
     except Exception as e:
-        print(f"❌ [{timestamp}] Push Error for {user_id}: {e}")
+        print(f"❌ [{timestamp}] Push error for {user_id[:8]}...: {e}")
 
 # ==========================================
-# スケジューラー（デバッグ強化版）
+# スケジューラーの配信ジョブ
 # ==========================================
-def schedule_checker():
-    """毎分00秒に正確に実行（デバッグ強化版）"""
-    print("=" * 70)
-    print("🚀 SCHEDULER THREAD STARTED")
-    print("=" * 70)
+def delivery_job():
+    """毎分実行される配信チェック処理"""
+    now = datetime.now(JST)
+    current_time = now.strftime("%H:%M")
+    timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
     
-    # 起動直後に全ユーザー設定を表示
+    print(f"\n⏰ [{timestamp}] Checking deliveries for {current_time}")
+    
+    # 配信対象ユーザーを取得
+    users = get_users_for_delivery(current_time)
+    
+    if users:
+        print(f"📬 Found {len(users)} user(s) to deliver:")
+        for user_id, genre in users:
+            print(f"   → {user_id[:8]}... ({genre})")
+            # 別スレッドで配信（並列処理）
+            threading.Thread(
+                target=send_news_to_user,
+                args=(user_id, genre),
+                daemon=True
+            ).start()
+    else:
+        print(f"   ℹ️  No deliveries scheduled for {current_time}")
+
+# ==========================================
+# スケジューラー起動
+# ==========================================
+def start_scheduler():
+    """APSchedulerを起動"""
+    scheduler = BackgroundScheduler(timezone=JST)
+    
+    # 毎分00秒に実行
+    scheduler.add_job(
+        delivery_job,
+        trigger=CronTrigger(minute='*', second='0', timezone=JST),
+        id='news_delivery_job',
+        name='News Delivery Check',
+        misfire_grace_time=30
+    )
+    
+    scheduler.start()
+    print("✅ APScheduler started (runs every minute at :00 seconds)")
+    
+    # 起動時に登録済みユーザーを表示
     try:
         conn, db_type = get_db_connection()
-        c = conn.cursor()
-        c.execute('SELECT user_id, delivery_time, genre FROM users')
-        all_users = c.fetchall()
+        cursor = conn.cursor()
+        cursor.execute('SELECT user_id, delivery_time, genre FROM users')
+        all_users = cursor.fetchall()
         conn.close()
         
-        print(f"\n📋 DATABASE TYPE: {db_type}")
-        print("📋 === ALL USER SETTINGS IN DATABASE ===")
+        print(f"\n📋 Database type: {db_type}")
         if all_users:
-            for user_id, dtime, genre in all_users:
-                print(f"   ✓ User: {user_id[:12]}..., Time: '{dtime}', Genre: {genre}")
+            print("📋 Registered users:")
+            for uid, dtime, genre in all_users:
+                print(f"   {uid[:8]}... | {dtime} | {genre}")
         else:
-            print("   ⚠️  NO USERS FOUND IN DATABASE!")
-        print("=" * 70 + "\n")
+            print("📋 No users registered yet")
     except Exception as e:
-        print(f"❌ Failed to load users at startup: {e}")
-        import traceback
-        traceback.print_exc()
-    
-    # 起動時に次の分まで待機
-    now = datetime.now(JST)
-    wait_seconds = 60 - now.second - (now.microsecond / 1000000.0)
-    if wait_seconds > 0:
-        print(f"⏱️  Waiting {wait_seconds:.1f}s to sync with minute boundary...\n")
-        time.sleep(wait_seconds)
-    
-    last_checked_minute = None
-    check_count = 0
-    
-    while True:
-        try:
-            now_jst = datetime.now(JST)
-            current_time_str = now_jst.strftime("%H:%M")
-            current_minute_key = now_jst.strftime("%Y%m%d%H%M")
-            timestamp = now_jst.strftime("%Y-%m-%d %H:%M:%S")
-            
-            check_count += 1
-            
-            # 同じ分に複数回実行しないようにチェック
-            if current_minute_key != last_checked_minute:
-                last_checked_minute = current_minute_key
-                
-                print(f"\n{'='*70}")
-                print(f"⏰ CHECK #{check_count} at {timestamp}")
-                print(f"   🔍 Looking for users with delivery_time = '{current_time_str}'")
-                
-                # デバッグ: 実際のクエリとDB内容を確認
-                try:
-                    conn, db_type = get_db_connection()
-                    c = conn.cursor()
-                    
-                    # 全ユーザーの時間を取得（デバッグ用）
-                    c.execute('SELECT user_id, delivery_time FROM users')
-                    all_times = c.fetchall()
-                    print(f"   📊 All delivery times in DB:")
-                    for uid, dt in all_times:
-                        match = "✅ MATCH!" if dt == current_time_str else ""
-                        print(f"      - {uid[:12]}...: '{dt}' {match}")
-                    
-                    # ターゲットユーザーを取得
-                    placeholder = '%s' if db_type == 'postgres' else '?'
-                    query = f'SELECT user_id, genre, delivery_time FROM users WHERE delivery_time = {placeholder}'
-                    c.execute(query, (current_time_str,))
-                    targets = c.fetchall()
-                    conn.close()
-                    
-                    print(f"   📬 Query returned {len(targets)} matching user(s)")
-                    
-                    if targets:
-                        print(f"   🎯 DELIVERING TO:")
-                        for user_id, genre, dtime in targets:
-                            print(f"      → User: {user_id[:12]}..., Genre: {genre}")
-                            threading.Thread(target=push_news, args=(user_id, genre), daemon=True).start()
-                        print(f"   ✅ Started {len(targets)} delivery thread(s)")
-                    else:
-                        print(f"   ℹ️  No deliveries scheduled for {current_time_str}")
-                    
-                except Exception as db_error:
-                    print(f"   ❌ Database error during check: {db_error}")
-                    import traceback
-                    traceback.print_exc()
-                
-                print(f"{'='*70}")
-            
-            # 次のチェックまで1秒待機
-            time.sleep(1)
-            
-        except Exception as e:
-            error_time = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
-            print(f"\n❌ [{error_time}] SCHEDULER ERROR: {e}")
-            import traceback
-            traceback.print_exc()
-            time.sleep(10)
+        print(f"❌ Failed to load users: {e}")
 
 # ==========================================
-# Flask Webルート
+# Flask Routes
 # ==========================================
 @app.route("/")
-def health_check():
-    return "OK"
+def index():
+    """ヘルスチェック用エンドポイント"""
+    return "VisAI Bot Running ✅"
 
 @app.route("/settings", methods=['GET', 'POST'])
 def settings():
+    """設定画面"""
     user_id = request.args.get('user_id')
-    timestamp = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
     
     if not user_id:
-        print(f"⚠️ [{timestamp}] Settings page accessed without user_id")
         return """
         <!DOCTYPE html>
         <html>
         <head>
+            <meta charset="UTF-8">
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
             <title>エラー</title>
             <style>
                 body {
-                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-                    padding: 20px;
-                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                    font-family: -apple-system, sans-serif;
+                    background: linear-gradient(135deg, #667eea, #764ba2);
                     min-height: 100vh;
                     display: flex;
                     align-items: center;
                     justify-content: center;
+                    padding: 20px;
                 }
                 .container {
-                    max-width: 400px;
                     background: white;
                     padding: 40px 30px;
                     border-radius: 16px;
                     box-shadow: 0 10px 40px rgba(0,0,0,0.2);
                     text-align: center;
+                    max-width: 400px;
                 }
                 h2 {
                     color: #e74c3c;
                     margin-bottom: 15px;
-                    font-size: 24px;
-                }
-                p {
-                    color: #555;
-                    font-size: 16px;
-                    line-height: 1.6;
                 }
             </style>
         </head>
@@ -533,39 +476,38 @@ def settings():
             </div>
         </body>
         </html>
-        """
-
+        """, 400
+    
     if request.method == 'POST':
         new_time = request.form.get('delivery_time')
         new_genre = request.form.get('genre')
         
-        print(f"⚙️ [{timestamp}] Settings update requested by {user_id}: time={new_time}, genre={new_genre}")
         update_user_settings(user_id, new_time, new_genre)
         
         return """
         <!DOCTYPE html>
         <html>
         <head>
+            <meta charset="UTF-8">
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
             <title>設定完了</title>
             <style>
                 body {
-                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-                    padding: 20px;
-                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                    font-family: -apple-system, sans-serif;
+                    background: linear-gradient(135deg, #667eea, #764ba2);
                     min-height: 100vh;
                     display: flex;
                     align-items: center;
                     justify-content: center;
-                    margin: 0;
+                    padding: 20px;
                 }
                 .container {
-                    max-width: 400px;
                     background: white;
                     padding: 50px 30px;
                     border-radius: 16px;
                     box-shadow: 0 10px 40px rgba(0,0,0,0.2);
                     text-align: center;
+                    max-width: 400px;
                     animation: slideIn 0.4s ease-out;
                 }
                 @keyframes slideIn {
@@ -588,18 +530,17 @@ def settings():
                     justify-content: center;
                     margin: 0 auto 25px;
                     font-size: 45px;
+                    color: white;
                 }
                 h2 {
                     color: #333;
                     margin-bottom: 20px;
                     font-size: 26px;
-                    font-weight: 600;
                 }
                 p {
                     color: #666;
                     font-size: 18px;
                     line-height: 1.8;
-                    margin: 12px 0;
                 }
                 .back-notice {
                     margin-top: 30px;
@@ -623,16 +564,22 @@ def settings():
         </body>
         </html>
         """
-
+    
+    # GET: 設定フォームを表示
     current_settings = get_user_settings(user_id)
-    print(f"📖 [{timestamp}] Settings page accessed by {user_id}")
+    
+    # ジャンル選択のオプションHTML生成
+    genre_options = ''
+    for genre_name in NEWS_CATEGORIES.keys():
+        selected = 'selected' if genre_name == current_settings['genre'] else ''
+        genre_options += f'<option value="{genre_name}" {selected}>{genre_name}</option>'
     
     html = f"""
     <!DOCTYPE html>
     <html>
     <head>
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>ニュース配信設定 - VisAI</title>
         <style>
             * {{
@@ -642,7 +589,7 @@ def settings():
             }}
             
             body {{
-                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', sans-serif;
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
                 background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
                 min-height: 100vh;
                 padding: 20px;
@@ -694,19 +641,32 @@ def settings():
                 font-size: 14px;
             }}
             
+            .current-settings {{
+                background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+                padding: 15px;
+                border-radius: 12px;
+                margin-bottom: 25px;
+                color: white;
+                font-size: 14px;
+                text-align: center;
+            }}
+            
+            .current-settings strong {{
+                font-weight: 600;
+            }}
+            
             .form-group {{
                 margin-bottom: 25px;
             }}
             
             label {{
-                display: block;
+                display: flex;
+                align-items: center;
+                gap: 8px;
                 color: #2c3e50;
                 font-weight: 600;
                 font-size: 15px;
                 margin-bottom: 10px;
-                display: flex;
-                align-items: center;
-                gap: 8px;
             }}
             
             .label-icon {{
@@ -743,10 +703,6 @@ def settings():
                 padding-right: 40px;
             }}
             
-            select option {{
-                padding: 10px;
-            }}
-            
             button {{
                 width: 100%;
                 padding: 16px;
@@ -770,20 +726,6 @@ def settings():
             
             button:active {{
                 transform: translateY(0);
-            }}
-            
-            .current-settings {{
-                background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
-                padding: 15px;
-                border-radius: 12px;
-                margin-bottom: 25px;
-                color: white;
-                font-size: 14px;
-                text-align: center;
-            }}
-            
-            .current-settings strong {{
-                font-weight: 600;
             }}
             
             .divider {{
@@ -822,7 +764,7 @@ def settings():
                         ニュースジャンル
                     </label>
                     <select name="genre">
-                        {''.join([f'<option value="{k}" {"selected" if k == current_settings["genre"] else ""}>{k}</option>' for k in RSS_URL.keys()])}
+                        {genre_options}
                     </select>
                 </div>
                 
@@ -832,51 +774,48 @@ def settings():
     </body>
     </html>
     """
+    
     return render_template_string(html)
 
-# ==========================================
-# LINE Webhook
-# ==========================================
 @app.route("/callback", methods=['POST'])
 def callback():
+    """LINE Webhook"""
     signature = request.headers.get("X-Line-Signature")
     body = request.get_data(as_text=True)
-
+    
     try:
-        web_hook_handler.handle(body, signature)
+        webhook_handler.handle(body, signature)
     except InvalidSignatureError:
-        timestamp = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
-        print(f"❌ [{timestamp}] Invalid signature received")
+        print(f"❌ Invalid signature")
         abort(400)
-
+    
     return "OK"
 
-@web_hook_handler.add(MessageEvent, message=TextMessage)
+# ==========================================
+# LINE メッセージハンドラー
+# ==========================================
+@webhook_handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
-    """
-    メッセージ受信時の処理
-    【重要】「今すぐ」に対する処理をPushからReply（無料）に変更
-    """
+    """LINEメッセージを受信したときの処理"""
     user_id = event.source.user_id
-    msg = event.message.text.strip()
+    text = event.message.text.strip()
     timestamp = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
     
-    print(f"💬 [{timestamp}] Message received from {user_id}: '{msg}'")
-
-    if msg == "今すぐ":
+    print(f"💬 [{timestamp}] Message from {user_id[:8]}...: '{text}'")
+    
+    # 「今すぐ」コマンド（Reply使用で無料）
+    if text == "今すぐ":
         settings = get_user_settings(user_id)
-        print(f"🚀 [{timestamp}] Immediate delivery requested by {user_id}")
+        print(f"🚀 [{timestamp}] Immediate delivery requested by {user_id[:8]}...")
         
-        # ニュース本文の生成（Pushではなくテキスト生成だけを行う）
-        # ※OpenAIの処理に時間がかかりすぎるとReplyToken（約30秒）が切れるリスクがありますが、
-        #   無料化のためにここでは同期処理（待機）を行います。
-        news_text = create_news_content(user_id, settings['genre'])
+        # ニュース本文を生成（同期処理）
+        news_content = create_news_message(user_id, settings['genre'])
         
-        # 返信用のメッセージリスト作成
-        reply_messages = [TextSendMessage(text=news_text)]
+        # 返信メッセージリスト
+        reply_messages = [TextSendMessage(text=news_content)]
         
-        # 応援メッセージが必要な場合は2通目として追加（これもReplyに含めれば無料）
-        if settings['delivery_count'] >= 6 and settings['support_message_shown'] == 0:
+        # 応援メッセージが必要な場合は追加
+        if settings['delivery_count'] >= 6 and settings['support_shown'] == 0:
             support_message = (
                 "いつもVisAIを使ってくれてありがとうございます！🙏\n\n"
                 "このbotは中学生の個人開発で、サーバー代やAIの利用料を自腹で運営しています。\n\n"
@@ -885,44 +824,57 @@ def handle_message(event):
                 f"↓応援はこちらから\n{BOOTH_SUPPORT_URL}"
             )
             reply_messages.append(TextSendMessage(text=support_message))
-            mark_support_message_shown(user_id)
-            print(f"💝 [{timestamp}] Support message appended to reply for {user_id}")
+            mark_support_shown(user_id)
+            print(f"💝 [{timestamp}] Support message added")
         
-        # 無料のReplyMessageを使って送信
+        # Reply送信（無料）
         line_bot_api.reply_message(event.reply_token, reply_messages)
-        print(f"✅ [{timestamp}] Sent via Reply (Free) to {user_id}")
+        print(f"✅ [{timestamp}] Replied to {user_id[:8]}... (Free)")
         return
-
-    if msg == "設定":
+    
+    # 「設定」コマンド
+    if text == "設定":
         settings_url = f"{APP_PUBLIC_URL}/settings?user_id={user_id}"
         
         reply_text = (
             "⚙️ 設定\n"
-            "以下のリンクから配達時間とジャンルを変更できます。\n\n"
+            "以下のリンクから配信時間とジャンルを変更できます。\n\n"
             f"{settings_url}\n\n"
             "※リンクを知っている人は誰でも設定を変更できてしまうため、他人に教えないでください。"
         )
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(reply_text))
-        print(f"⚙️ [{timestamp}] Settings link sent to {user_id}")
+        
+        line_bot_api.reply_message(
+            event.reply_token,
+            TextSendMessage(text=reply_text)
+        )
+        print(f"⚙️ [{timestamp}] Settings link sent to {user_id[:8]}...")
         return
-
-    # メニュー表示（ここもReplyなので無料）
+    
+    # その他のメッセージ：メニューを表示
     line_bot_api.reply_message(
         event.reply_token,
-        TextSendMessage("💡メニュー\n・「今すぐ」: 今すぐニュースを受信(無料)\n・「設定」: 時間やジャンルを変更")
+        TextSendMessage(text="💡メニュー\n・「今すぐ」: 今すぐニュースを受信(無料)\n・「設定」: 時間やジャンルを変更")
     )
-    print(f"ℹ️ [{timestamp}] Help menu sent to {user_id}")
+    print(f"ℹ️ [{timestamp}] Help menu sent to {user_id[:8]}...")
 
 # ==========================================
-# アプリ起動時の初期化
+# アプリ起動処理
 # ==========================================
-init_db()
-
-scheduler_thread = threading.Thread(target=schedule_checker, daemon=True)
-scheduler_thread.start()
-
-startup_time = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
-print(f"✅ [{startup_time}] VisAI LINE Bot started successfully (Deep-Dive & Free-Reply Mode)")
-
 if __name__ == "__main__":
-    app.run(debug=True, host='0.0.0.0', port=10000)
+    print("\n" + "=" * 70)
+    print("🚀 Starting VisAI LINE Bot")
+    print("=" * 70 + "\n")
+    
+    # データベース初期化
+    init_database()
+    
+    # スケジューラー起動
+    start_scheduler()
+    
+    startup_time = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
+    print(f"\n{'=' * 70}")
+    print(f"✅ Bot started successfully at {startup_time}")
+    print(f"{'=' * 70}\n")
+    
+    # Flaskサーバー起動
+    app.run(host='0.0.0.0', port=10000, debug=False)
