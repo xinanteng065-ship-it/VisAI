@@ -8,3 +8,4 @@ pytz
 gunicorn
 aiohttp
 APScheduler
+psycopg2-binary
