@@ -97,24 +97,31 @@ def get_user_settings(user_id):
         row = cursor.fetchone()
         
         if not row:
+            # 新規ユーザーの場合はデフォルト値で作成
             cursor.execute(
                 'INSERT INTO users (user_id, delivery_time, genre, delivery_count, support_shown) VALUES (?, ?, ?, ?, ?)',
                 (user_id, '08:00', 'トップ', 0, 0)
             )
             conn.commit()
-            row = {'delivery_time': '08:00', 'genre': 'トップ', 'delivery_count': 0, 'support_shown': 0, 'last_delivery': None}
+            conn.close()
+            return {'time': '08:00', 'genre': 'トップ', 'delivery_count': 0, 'support_shown': 0, 'last_delivery': None}
+        
+        # row_factoryでsqlite3.Rowオブジェクトとして取得
+        result = {
+            'time': row['delivery_time'],
+            'genre': row['genre'],
+            'delivery_count': row['delivery_count'],
+            'support_shown': row['support_shown'],
+            'last_delivery': row['last_delivery']
+        }
         
         conn.close()
+        return result
         
-        return {
-            'time': row['delivery_time'] if isinstance(row, sqlite3.Row) else row[0],
-            'genre': row['genre'] if isinstance(row, sqlite3.Row) else row[1],
-            'delivery_count': row['delivery_count'] if isinstance(row, sqlite3.Row) else row[2],
-            'support_shown': row['support_shown'] if isinstance(row, sqlite3.Row) else row[3],
-            'last_delivery': row['last_delivery'] if isinstance(row, sqlite3.Row) else (row[4] if len(row) > 4 else None)
-        }
     except Exception as e:
         print(f"❌ get_user_settings error: {e}")
+        import traceback
+        traceback.print_exc()
         return {'time': '08:00', 'genre': 'トップ', 'delivery_count': 0, 'support_shown': 0, 'last_delivery': None}
 
 # ==========================================
