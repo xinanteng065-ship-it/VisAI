@@ -201,20 +201,36 @@ def get_users_for_delivery(hour, minute):
         
         # 今日の日付
         today = datetime.now(JST).strftime("%Y-%m-%d")
+        today_start = f"{today} 00:00:00"
+        
+        # デバッグ: 全ユーザーの配信時間を表示
+        cursor.execute('SELECT user_id, delivery_time, last_delivery FROM users')
+        all_users_debug = cursor.fetchall()
+        print(f"🔍 Debug - Target time: {target_time}, Today start: {today_start}")
+        print(f"🔍 Debug - All users in DB:")
+        for row in all_users_debug:
+            print(f"   User: {row[0][:8]}... | Time: {row[1]} | Last: {row[2]}")
         
         # 今日まだ配信していないユーザーのみ取得
         cursor.execute('''
-            SELECT user_id, genre FROM users 
+            SELECT user_id, genre, delivery_time, last_delivery FROM users 
             WHERE delivery_time = ? 
             AND (last_delivery IS NULL OR last_delivery < ?)
-        ''', (target_time, f"{today} 00:00:00"))
+        ''', (target_time, today_start))
         
         users = cursor.fetchall()
         conn.close()
         
+        # デバッグ: マッチしたユーザーを表示
+        print(f"🔍 Debug - Matched {len(users)} users for {target_time}")
+        for row in users:
+            print(f"   ✓ {row[0][:8]}... | Genre: {row[1]} | Time: {row[2]} | Last: {row[3]}")
+        
         return [(row[0], row[1]) for row in users]
     except Exception as e:
         print(f"❌ get_users_for_delivery error: {e}")
+        import traceback
+        traceback.print_exc()
         return []
 
 # ==========================================
@@ -403,25 +419,27 @@ def start_scheduler():
             'interval',
             minutes=1,
             id='news_delivery_job',
-            name='News Delivery Check'
+            name='News Delivery Check',
+            next_run_time=datetime.now(JST)  # すぐに実行開始
         )
         
         scheduler.start()
         print("✅ APScheduler started (runs every minute)")
+        print(f"⏰ Next job will run at: {datetime.now(JST).strftime('%H:%M:%S')}")
         
         # 登録済みユーザーを表示
         try:
             conn = get_db()
             cursor = conn.cursor()
-            cursor.execute('SELECT user_id, delivery_time, genre FROM users')
+            cursor.execute('SELECT user_id, delivery_time, genre, last_delivery FROM users')
             all_users = cursor.fetchall()
             conn.close()
             
             if all_users:
                 print("\n📋 Registered users:")
                 for row in all_users:
-                    uid, dtime, genre = row[0], row[1], row[2]
-                    print(f"   {uid[:8]}... | {dtime} | {genre}")
+                    uid, dtime, genre, last = row[0], row[1], row[2], row[3]
+                    print(f"   {uid[:8]}... | {dtime} | {genre} | Last: {last}")
             else:
                 print("\n📋 No users registered yet")
         except Exception as e:
