@@ -868,11 +868,27 @@ if __name__ == "__main__":
     print("=" * 70 + "\n")
     
     init_database()
+    
+    # スケジューラーを確実に起動
+    import atexit
     start_scheduler()
+    
+    # シャットダウン時の処理
+    def shutdown_scheduler():
+        print("\n🛑 Shutting down scheduler...")
+    atexit.register(shutdown_scheduler)
     
     startup_time = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
     print(f"\n{'=' * 70}")
     print(f"✅ Bot started successfully at {startup_time}")
     print(f"{'=' * 70}\n")
     
+    # Gunicornで動作させる場合もスケジューラーを起動
     app.run(host='0.0.0.0', port=10000, debug=False)
+
+# Gunicorn用: ワーカープロセスでもスケジューラーを起動
+def on_starting(server):
+    """Gunicorn起動時に実行"""
+    print("\n🔧 Gunicorn starting - initializing scheduler...")
+    init_database()
+    start_scheduler()
