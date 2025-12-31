@@ -1,19 +1,15 @@
 import os
 import sqlite3
-import threading
 import feedparser
 import random
 from datetime import datetime
 from pytz import timezone
 from flask import Flask, request, abort, render_template_string
-
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage
 from openai import OpenAI
-
 from apscheduler.schedulers.background import BackgroundScheduler
-from apscheduler.triggers.cron import CronTrigger
 
 app = Flask(__name__)
 
@@ -23,7 +19,6 @@ app = Flask(__name__)
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-DATABASE_URL = os.environ.get("DATABASE_URL")
 APP_PUBLIC_URL = os.environ.get("APP_PUBLIC_URL", "https://visai.onrender.com")
 BOOTH_SUPPORT_URL = "https://visai.booth.pm/items/7763380"
 
@@ -48,13 +43,15 @@ NEWS_CATEGORIES = {
 }
 
 # ==========================================
-# データベース接続（SQLiteのみ - シンプル版）
+# データベース接続
 # ==========================================
 DB_PATH = os.path.join(os.path.dirname(__file__), "users.db")
 
 def get_db():
     """SQLite接続を取得"""
-    return sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 # ==========================================
 # データベース初期化
@@ -71,17 +68,19 @@ def init_database():
                 delivery_time TEXT NOT NULL DEFAULT '08:00',
                 genre TEXT NOT NULL DEFAULT 'トップ',
                 delivery_count INTEGER DEFAULT 0,
-                support_shown INTEGER DEFAULT 0
+                support_shown INTEGER DEFAULT 0,
+                last_delivery TEXT
             )
         ''')
         
         conn.commit()
         conn.close()
-        print("✅ Database initialized (SQLite)")
+        print("✅ Database initialized")
     except Exception as e:
         print(f"❌ Database initialization error: {e}")
 
 init_database()
+
 # ==========================================
 # ユーザー設定の取得
 # ==========================================
@@ -92,31 +91,31 @@ def get_user_settings(user_id):
         cursor = conn.cursor()
         
         cursor.execute(
-            'SELECT delivery_time, genre, delivery_count, support_shown FROM users WHERE user_id = ?',
+            'SELECT delivery_time, genre, delivery_count, support_shown, last_delivery FROM users WHERE user_id = ?',
             (user_id,)
         )
         row = cursor.fetchone()
         
         if not row:
-            # 新規ユーザーの場合はデフォルト値で作成
             cursor.execute(
                 'INSERT INTO users (user_id, delivery_time, genre, delivery_count, support_shown) VALUES (?, ?, ?, ?, ?)',
                 (user_id, '08:00', 'トップ', 0, 0)
             )
             conn.commit()
-            row = ('08:00', 'トップ', 0, 0)
+            row = {'delivery_time': '08:00', 'genre': 'トップ', 'delivery_count': 0, 'support_shown': 0, 'last_delivery': None}
         
         conn.close()
         
         return {
-            'time': row[0],
-            'genre': row[1],
-            'delivery_count': row[2],
-            'support_shown': row[3]
+            'time': row['delivery_time'] if isinstance(row, sqlite3.Row) else row[0],
+            'genre': row['genre'] if isinstance(row, sqlite3.Row) else row[1],
+            'delivery_count': row['delivery_count'] if isinstance(row, sqlite3.Row) else row[2],
+            'support_shown': row['support_shown'] if isinstance(row, sqlite3.Row) else row[3],
+            'last_delivery': row['last_delivery'] if isinstance(row, sqlite3.Row) else (row[4] if len(row) > 4 else None)
         }
     except Exception as e:
         print(f"❌ get_user_settings error: {e}")
-        return {'time': '08:00', 'genre': 'トップ', 'delivery_count': 0, 'support_shown': 0}
+        return {'time': '08:00', 'genre': 'トップ', 'delivery_count': 0, 'support_shown': 0, 'last_delivery': None}
 
 # ==========================================
 # ユーザー設定の更新
@@ -145,18 +144,20 @@ def update_user_settings(user_id, delivery_time, genre):
 # 配信回数のカウント
 # ==========================================
 def increment_delivery_count(user_id):
-    """配信回数を1増やす"""
+    """配信回数を1増やし、最終配信時刻を記録"""
     try:
         conn = get_db()
         cursor = conn.cursor()
+        now = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
         
         cursor.execute(
-            'UPDATE users SET delivery_count = delivery_count + 1 WHERE user_id = ?',
-            (user_id,)
+            'UPDATE users SET delivery_count = delivery_count + 1, last_delivery = ? WHERE user_id = ?',
+            (now, user_id)
         )
         
         conn.commit()
         conn.close()
+        print(f"✅ Incremented delivery count for {user_id[:8]}...")
     except Exception as e:
         print(f"❌ increment_delivery_count error: {e}")
 
@@ -182,20 +183,29 @@ def mark_support_shown(user_id):
 # ==========================================
 # 指定時刻の配信対象ユーザーを取得
 # ==========================================
-def get_users_for_delivery(target_time):
-    """配信時刻が一致するユーザーのリストを返す"""
+def get_users_for_delivery(hour, minute):
+    """配信時刻が一致するユーザーのリストを返す（重複配信を防ぐ）"""
     try:
         conn = get_db()
         cursor = conn.cursor()
         
-        cursor.execute(
-            'SELECT user_id, genre FROM users WHERE delivery_time = ?',
-            (target_time,)
-        )
-        users = cursor.fetchall()
+        # HH:MM形式に変換
+        target_time = f"{hour:02d}:{minute:02d}"
         
+        # 今日の日付
+        today = datetime.now(JST).strftime("%Y-%m-%d")
+        
+        # 今日まだ配信していないユーザーのみ取得
+        cursor.execute('''
+            SELECT user_id, genre FROM users 
+            WHERE delivery_time = ? 
+            AND (last_delivery IS NULL OR last_delivery < ?)
+        ''', (target_time, f"{today} 00:00:00"))
+        
+        users = cursor.fetchall()
         conn.close()
-        return users
+        
+        return [(row[0], row[1]) for row in users]
     except Exception as e:
         print(f"❌ get_users_for_delivery error: {e}")
         return []
@@ -213,10 +223,7 @@ def fetch_news(category):
         if not feed.entries:
             return None, []
         
-        # メイン記事をランダムに1件選択
         main_article = random.choice(feed.entries[:10])
-        
-        # 関連ニュースとして残りから5件取得（重複を除く）
         related_articles = [e for e in feed.entries if e.link != main_article.link][:5]
         
         return main_article, related_articles
@@ -292,27 +299,21 @@ def analyze_news_with_ai(article, category):
 # ニュースメッセージ作成
 # ==========================================
 def create_news_message(user_id, category):
-    """ニュース本文を作成（配信回数もカウント）"""
+    """ニュース本文を作成"""
     try:
-        # ニュースを取得
         main_article, related_articles = fetch_news(category)
         
         if not main_article:
             return "申し訳ありません。現在ニュースが取得できませんでした。"
         
-        # AI分析を生成
         analysis = analyze_news_with_ai(main_article, category)
-        
-        # メッセージを組み立て
         message = f"{analysis}\n\n🔗 詳細記事はこちら\n{main_article.link}"
         
-        # 関連ニュースを追加
         if related_articles:
             message += "\n\n━━━━━━━━━━━━━━━━\n📰 その他の関連ニュース\n"
             for i, article in enumerate(related_articles, 1):
                 message += f"\n{i}. {article.title}\n{article.link}\n"
         
-        # 配信回数をカウント
         increment_delivery_count(user_id)
         
         return message
@@ -330,13 +331,9 @@ def send_news_to_user(user_id, category):
     try:
         print(f"📤 [{timestamp}] Sending news to {user_id[:8]}... (Genre: {category})")
         
-        # ニュース本文を作成
         news_content = create_news_message(user_id, category)
-        
-        # 送信するメッセージリスト
         messages = [TextSendMessage(text=news_content)]
         
-        # 応援メッセージが必要かチェック
         settings = get_user_settings(user_id)
         if settings['delivery_count'] >= 6 and settings['support_shown'] == 0:
             support_message = (
@@ -348,14 +345,13 @@ def send_news_to_user(user_id, category):
             )
             messages.append(TextSendMessage(text=support_message))
             mark_support_shown(user_id)
-            print(f"💝 [{timestamp}] Support message added for {user_id[:8]}...")
+            print(f"💝 [{timestamp}] Support message added")
         
-        # Push送信
         line_bot_api.push_message(user_id, messages)
         print(f"✅ [{timestamp}] Successfully sent to {user_id[:8]}...")
         
     except Exception as e:
-        print(f"❌ [{timestamp}] Push error for {user_id[:8]}...: {e}")
+        print(f"❌ [{timestamp}] Push error: {e}")
         import traceback
         traceback.print_exc()
 
@@ -366,26 +362,21 @@ def delivery_job():
     """毎分実行される配信チェック処理"""
     try:
         now = datetime.now(JST)
-        current_time = now.strftime("%H:%M")
+        hour = now.hour
+        minute = now.minute
         timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
         
-        print(f"\n⏰ [{timestamp}] Checking deliveries for {current_time}")
+        print(f"\n⏰ [{timestamp}] Checking deliveries for {hour:02d}:{minute:02d}")
         
-        # 配信対象ユーザーを取得
-        users = get_users_for_delivery(current_time)
+        users = get_users_for_delivery(hour, minute)
         
         if users:
             print(f"📬 Found {len(users)} user(s) to deliver:")
             for user_id, genre in users:
                 print(f"   → {user_id[:8]}... ({genre})")
-                # 別スレッドで配信（並列処理）
-                threading.Thread(
-                    target=send_news_to_user,
-                    args=(user_id, genre),
-                    daemon=True
-                ).start()
+                send_news_to_user(user_id, genre)
         else:
-            print(f"   ℹ️  No deliveries scheduled for {current_time}")
+            print(f"   ℹ️  No deliveries scheduled for {hour:02d}:{minute:02d}")
     except Exception as e:
         print(f"❌ delivery_job error: {e}")
         import traceback
@@ -399,19 +390,19 @@ def start_scheduler():
     try:
         scheduler = BackgroundScheduler(timezone=JST)
         
-        # 毎分00秒に実行
+        # 毎分実行
         scheduler.add_job(
             delivery_job,
-            trigger=CronTrigger(minute='*', second='0', timezone=JST),
+            'interval',
+            minutes=1,
             id='news_delivery_job',
-            name='News Delivery Check',
-            misfire_grace_time=30
+            name='News Delivery Check'
         )
         
         scheduler.start()
-        print("✅ APScheduler started (runs every minute at :00 seconds)")
+        print("✅ APScheduler started (runs every minute)")
         
-        # 起動時に登録済みユーザーを表示
+        # 登録済みユーザーを表示
         try:
             conn = get_db()
             cursor = conn.cursor()
@@ -421,7 +412,8 @@ def start_scheduler():
             
             if all_users:
                 print("\n📋 Registered users:")
-                for uid, dtime, genre in all_users:
+                for row in all_users:
+                    uid, dtime, genre = row[0], row[1], row[2]
                     print(f"   {uid[:8]}... | {dtime} | {genre}")
             else:
                 print("\n📋 No users registered yet")
@@ -574,10 +566,8 @@ def settings():
             </html>
             """
         
-        # GET: 設定フォームを表示
         current_settings = get_user_settings(user_id)
         
-        # ジャンル選択のオプションHTML生成
         genre_options = ''
         for genre_name in NEWS_CATEGORIES.keys():
             selected = 'selected' if genre_name == current_settings['genre'] else ''
@@ -786,9 +776,6 @@ def callback():
         traceback.print_exc()
         return "OK"
 
-# ==========================================
-# LINE メッセージハンドラー
-# ==========================================
 @webhook_handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     """LINEメッセージを受信したときの処理"""
@@ -799,18 +786,13 @@ def handle_message(event):
         
         print(f"💬 [{timestamp}] Message from {user_id[:8]}...: '{text}'")
         
-        # 「今すぐ」コマンド（Reply使用で無料）
         if text == "今すぐ":
             settings = get_user_settings(user_id)
             print(f"🚀 [{timestamp}] Immediate delivery requested by {user_id[:8]}...")
             
-            # ニュース本文を生成（同期処理）
             news_content = create_news_message(user_id, settings['genre'])
-            
-            # 返信メッセージリスト
             reply_messages = [TextSendMessage(text=news_content)]
             
-            # 応援メッセージが必要な場合は追加
             if settings['delivery_count'] >= 6 and settings['support_shown'] == 0:
                 support_message = (
                     "いつもVisAIを使ってくれてありがとうございます！🙏\n\n"
@@ -823,12 +805,10 @@ def handle_message(event):
                 mark_support_shown(user_id)
                 print(f"💝 [{timestamp}] Support message added")
             
-            # Reply送信（無料）
             line_bot_api.reply_message(event.reply_token, reply_messages)
-            print(f"✅ [{timestamp}] Replied to {user_id[:8]}... (Free)")
+            print(f"✅ [{timestamp}] Replied to {user_id[:8]}...")
             return
         
-        # 「設定」コマンド
         if text == "設定":
             settings_url = f"{APP_PUBLIC_URL}/settings?user_id={user_id}"
             
@@ -846,10 +826,9 @@ def handle_message(event):
             print(f"⚙️ [{timestamp}] Settings link sent to {user_id[:8]}...")
             return
         
-        # その他のメッセージ：メニューを表示
         line_bot_api.reply_message(
             event.reply_token,
-            TextSendMessage(text="💡メニュー\n・「今すぐ」: 今すぐニュースを受信(無料)\n・「設定」: 時間やジャンルを変更")
+            TextSendMessage(text="💡メニュー\n・「今すぐ」: 今すぐニュースを受信\n・「設定」: 時間やジャンルを変更")
         )
         print(f"ℹ️ [{timestamp}] Help menu sent to {user_id[:8]}...")
         
@@ -858,18 +837,12 @@ def handle_message(event):
         import traceback
         traceback.print_exc()
 
-# ==========================================
-# アプリ起動処理
-# ==========================================
 if __name__ == "__main__":
     print("\n" + "=" * 70)
     print("🚀 Starting VisAI LINE Bot")
     print("=" * 70 + "\n")
     
-    # データベース初期化
     init_database()
-    
-    # スケジューラー起動
     start_scheduler()
     
     startup_time = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
@@ -877,5 +850,4 @@ if __name__ == "__main__":
     print(f"✅ Bot started successfully at {startup_time}")
     print(f"{'=' * 70}\n")
     
-    # Flaskサーバー起動
     app.run(host='0.0.0.0', port=10000, debug=False)
