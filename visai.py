@@ -7,9 +7,12 @@ from pytz import timezone
 from flask import Flask, request, abort, render_template_string
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
-from linebot.models import MessageEvent, TextMessage, TextSendMessage
+from linebot.models import MessageEvent, TextMessage, TextSendMessage, ImageSendMessage
 from openai import OpenAI
 from apscheduler.schedulers.background import BackgroundScheduler
+import qrcode
+from io import BytesIO
+import base64
 
 app = Flask(__name__)
 
@@ -21,6 +24,9 @@ LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 APP_PUBLIC_URL = os.environ.get("APP_PUBLIC_URL", "https://visai.onrender.com")
 BOOTH_SUPPORT_URL = "https://visai.booth.pm/items/7763380"
+
+# LINE Bot ID (環境変数から取得、または@で始まるBot IDを設定)
+LINE_BOT_ID = os.environ.get("LINE_BOT_ID", "@298qcfgk")
 
 if not all([LINE_CHANNEL_ACCESS_TOKEN, LINE_CHANNEL_SECRET, OPENAI_API_KEY]):
     raise ValueError("🚨 必要な環境変数が設定されていません")
@@ -106,7 +112,6 @@ def get_user_settings(user_id):
             conn.close()
             return {'time': '08:00', 'genre': 'トップ', 'delivery_count': 0, 'support_shown': 0, 'last_delivery': None}
         
-        # row_factoryでsqlite3.Rowオブジェクトとして取得
         result = {
             'time': row['delivery_time'],
             'genre': row['genre'],
@@ -203,14 +208,6 @@ def get_users_for_delivery(hour, minute):
         today = datetime.now(JST).strftime("%Y-%m-%d")
         today_start = f"{today} 00:00:00"
         
-        # デバッグ: 全ユーザーの配信時間を表示
-        cursor.execute('SELECT user_id, delivery_time, last_delivery FROM users')
-        all_users_debug = cursor.fetchall()
-        print(f"🔍 Debug - Target time: {target_time}, Today start: {today_start}")
-        print(f"🔍 Debug - All users in DB:")
-        for row in all_users_debug:
-            print(f"   User: {row[0][:8]}... | Time: {row[1]} | Last: {row[2]}")
-        
         # 今日まだ配信していないユーザーのみ取得
         cursor.execute('''
             SELECT user_id, genre, delivery_time, last_delivery FROM users 
@@ -221,10 +218,7 @@ def get_users_for_delivery(hour, minute):
         users = cursor.fetchall()
         conn.close()
         
-        # デバッグ: マッチしたユーザーを表示
-        print(f"🔍 Debug - Matched {len(users)} users for {target_time}")
-        for row in users:
-            print(f"   ✓ {row[0][:8]}... | Genre: {row[1]} | Time: {row[2]} | Last: {row[3]}")
+        print(f"📋 Found {len(users)} user(s) for delivery at {target_time}")
         
         return [(row[0], row[1]) for row in users]
     except Exception as e:
@@ -304,7 +298,7 @@ def analyze_news_with_ai(article, category):
 
     try:
         response = openai_client.chat.completions.create(
-            model="gpt-5-nano",
+            model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
@@ -343,6 +337,42 @@ def create_news_message(user_id, category):
     except Exception as e:
         print(f"❌ create_news_message error: {e}")
         return "ニュースの生成中にエラーが発生しました。"
+
+# ==========================================
+# 友だち追加用QRコード生成
+# ==========================================
+def generate_friend_qr():
+    """LINE友だち追加用のQRコードを生成してBase64文字列で返す"""
+    try:
+        # LINE友だち追加URL
+        line_add_url = f"https://line.me/R/ti/p/{LINE_BOT_ID}"
+        
+        # QRコード生成
+        qr = qrcode.QRCode(
+            version=1,
+            error_correction=qrcode.constants.ERROR_CORRECT_L,
+            box_size=10,
+            border=4,
+        )
+        qr.add_data(line_add_url)
+        qr.make(fit=True)
+        
+        # 画像生成
+        img = qr.make_image(fill_color="black", back_color="white")
+        
+        # BytesIOに保存
+        buffer = BytesIO()
+        img.save(buffer, format='PNG')
+        buffer.seek(0)
+        
+        # Base64エンコード
+        img_base64 = base64.b64encode(buffer.getvalue()).decode()
+        
+        return line_add_url, img_base64
+        
+    except Exception as e:
+        print(f"❌ QR generation error: {e}")
+        return None, None
 
 # ==========================================
 # ニュース配信（Push送信）
@@ -420,7 +450,7 @@ def start_scheduler():
             minutes=1,
             id='news_delivery_job',
             name='News Delivery Check',
-            next_run_time=datetime.now(JST)  # すぐに実行開始
+            next_run_time=datetime.now(JST)
         )
         
         scheduler.start()
@@ -811,6 +841,7 @@ def handle_message(event):
         
         print(f"💬 [{timestamp}] Message from {user_id[:8]}...: '{text}'")
         
+        # 今すぐニュースを配信
         if text == "今すぐ":
             settings = get_user_settings(user_id)
             print(f"🚀 [{timestamp}] Immediate delivery requested by {user_id[:8]}...")
@@ -834,6 +865,7 @@ def handle_message(event):
             print(f"✅ [{timestamp}] Replied to {user_id[:8]}...")
             return
         
+        # 設定画面へのリンクを送信
         if text == "設定":
             settings_url = f"{APP_PUBLIC_URL}/settings?user_id={user_id}"
             
@@ -851,9 +883,33 @@ def handle_message(event):
             print(f"⚙️ [{timestamp}] Settings link sent to {user_id[:8]}...")
             return
         
+        # 友だちに紹介する機能
+        if text == "友だちに紹介する" or text == "友達に紹介する" or text == "紹介":
+            line_add_url = f"https://line.me/R/ti/p/{LINE_BOT_ID}"
+            
+            reply_text = (
+                "📢 友だちに紹介\n\n"
+                "VisAIを友だちに紹介していただきありがとうございます！\n\n"
+                "以下のリンクやQRコードを友だちに転送してください👇\n\n"
+                f"🔗 友だち追加リンク\n{line_add_url}\n\n"
+                "📱 使い方\n"
+                "① このメッセージを転送\n"
+                "② リンクをタップして友だち追加\n"
+                "③ 「今すぐ」でニュースを受け取れます\n\n"
+                "💡 紹介してくれると開発の励みになります！"
+            )
+            
+            line_bot_api.reply_message(
+                event.reply_token,
+                TextSendMessage(text=reply_text)
+            )
+            print(f"👥 [{timestamp}] Friend referral sent to {user_id[:8]}...")
+            return
+        
+        # デフォルトのヘルプメニュー
         line_bot_api.reply_message(
             event.reply_token,
-            TextSendMessage(text="💡メニュー\n・「今すぐ」: 今すぐニュースを受信\n・「設定」: 時間やジャンルを変更")
+            TextSendMessage(text="💡メニュー\n・「今すぐ」: 今すぐニュースを受信\n・「設定」: 時間やジャンルを変更\n・「友だちに紹介する」: 友だちに紹介")
         )
         print(f"ℹ️ [{timestamp}] Help menu sent to {user_id[:8]}...")
         
