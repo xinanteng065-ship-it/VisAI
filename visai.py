@@ -2,7 +2,7 @@ import os
 import sqlite3
 import feedparser
 import random
-from datetime import datetime
+from datetime import datetime, date
 from pytz import timezone
 from flask import Flask, request, abort, render_template_string
 from linebot import LineBotApi, WebhookHandler
@@ -10,6 +10,7 @@ from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage
 from openai import OpenAI
 from apscheduler.schedulers.background import BackgroundScheduler
+import atexit
 
 app = Flask(__name__)
 
@@ -43,19 +44,14 @@ NEWS_CATEGORIES = {
     "IT": "https://news.yahoo.co.jp/rss/topics/it.xml",
 }
 
-# グローバルなスケジューラー変数
+# スケジューラー
 scheduler = None
 
 # ==========================================
-# データベース接続
+# データベースパス
 # ==========================================
-DB_PATH = os.path.join(os.path.dirname(__file__), "users.db")
-
-def get_db():
-    """SQLite接続を取得"""
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    return conn
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "users.db")
+print(f"📁 Database path: {DB_PATH}")
 
 # ==========================================
 # データベース初期化
@@ -63,7 +59,7 @@ def get_db():
 def init_database():
     """テーブルを作成"""
     try:
-        conn = get_db()
+        conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         
         cursor.execute('''
@@ -73,54 +69,62 @@ def init_database():
                 genre TEXT NOT NULL DEFAULT 'トップ',
                 delivery_count INTEGER DEFAULT 0,
                 support_shown INTEGER DEFAULT 0,
-                last_delivery TEXT
+                last_delivery_date TEXT
             )
         ''')
         
         conn.commit()
         conn.close()
-        print("✅ Database initialized")
+        print("✅ Database initialized successfully")
     except Exception as e:
         print(f"❌ Database initialization error: {e}")
+        import traceback
+        traceback.print_exc()
 
 # ==========================================
 # ユーザー設定の取得
 # ==========================================
 def get_user_settings(user_id):
-    """ユーザー設定を取得（存在しない場合はデフォルト値で作成）"""
+    """ユーザー設定を取得"""
     try:
-        conn = get_db()
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         
         cursor.execute(
-            'SELECT delivery_time, genre, delivery_count, support_shown, last_delivery FROM users WHERE user_id = ?',
+            'SELECT delivery_time, genre, delivery_count, support_shown, last_delivery_date FROM users WHERE user_id = ?',
             (user_id,)
         )
         row = cursor.fetchone()
         
         if not row:
+            # 新規ユーザーをデフォルト値で作成
             cursor.execute(
-                'INSERT INTO users (user_id, delivery_time, genre, delivery_count, support_shown) VALUES (?, ?, ?, ?, ?)',
-                (user_id, '08:00', 'トップ', 0, 0)
+                'INSERT INTO users (user_id, delivery_time, genre, delivery_count, support_shown, last_delivery_date) VALUES (?, ?, ?, ?, ?, ?)',
+                (user_id, '08:00', 'トップ', 0, 0, None)
             )
             conn.commit()
             conn.close()
-            return {'time': '08:00', 'genre': 'トップ', 'delivery_count': 0, 'support_shown': 0, 'last_delivery': None}
+            print(f"✅ New user created: {user_id[:8]}... (08:00, トップ)")
+            return {'time': '08:00', 'genre': 'トップ', 'delivery_count': 0, 'support_shown': 0, 'last_delivery_date': None}
         
         result = {
             'time': row['delivery_time'],
             'genre': row['genre'],
             'delivery_count': row['delivery_count'],
             'support_shown': row['support_shown'],
-            'last_delivery': row['last_delivery']
+            'last_delivery_date': row['last_delivery_date']
         }
         
         conn.close()
+        print(f"📖 User settings: {user_id[:8]}... -> {result['time']}, {result['genre']}")
         return result
         
     except Exception as e:
         print(f"❌ get_user_settings error: {e}")
-        return {'time': '08:00', 'genre': 'トップ', 'delivery_count': 0, 'support_shown': 0, 'last_delivery': None}
+        import traceback
+        traceback.print_exc()
+        return {'time': '08:00', 'genre': 'トップ', 'delivery_count': 0, 'support_shown': 0, 'last_delivery_date': None}
 
 # ==========================================
 # ユーザー設定の更新
@@ -128,43 +132,62 @@ def get_user_settings(user_id):
 def update_user_settings(user_id, delivery_time, genre):
     """配信時間とジャンルを更新"""
     try:
-        conn = get_db()
+        conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         
-        cursor.execute('''
-            INSERT INTO users (user_id, delivery_time, genre, delivery_count, support_shown)
-            VALUES (?, ?, ?, 0, 0)
-            ON CONFLICT(user_id) DO UPDATE SET
-                delivery_time = excluded.delivery_time,
-                genre = excluded.genre
-        ''', (user_id, delivery_time, genre))
+        # まずユーザーが存在するか確認
+        cursor.execute('SELECT user_id FROM users WHERE user_id = ?', (user_id,))
+        exists = cursor.fetchone()
+        
+        if exists:
+            # 既存ユーザーを更新
+            cursor.execute(
+                'UPDATE users SET delivery_time = ?, genre = ? WHERE user_id = ?',
+                (delivery_time, genre, user_id)
+            )
+            print(f"✅ Updated existing user: {user_id[:8]}... -> {delivery_time}, {genre}")
+        else:
+            # 新規ユーザーを作成
+            cursor.execute(
+                'INSERT INTO users (user_id, delivery_time, genre, delivery_count, support_shown, last_delivery_date) VALUES (?, ?, ?, ?, ?, ?)',
+                (user_id, delivery_time, genre, 0, 0, None)
+            )
+            print(f"✅ Created new user: {user_id[:8]}... -> {delivery_time}, {genre}")
         
         conn.commit()
         conn.close()
-        print(f"✅ Updated settings: {user_id[:8]}... -> {delivery_time}, {genre}")
+        
+        # 確認のため再度取得
+        verify_settings = get_user_settings(user_id)
+        print(f"✔️ Verified settings: {verify_settings}")
+        
     except Exception as e:
         print(f"❌ update_user_settings error: {e}")
+        import traceback
+        traceback.print_exc()
 
 # ==========================================
 # 配信回数のカウント
 # ==========================================
 def increment_delivery_count(user_id):
-    """配信回数を1増やし、最終配信時刻を記録"""
+    """配信回数を1増やし、最終配信日を記録"""
     try:
-        conn = get_db()
+        conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        now = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
+        today = date.today().isoformat()
         
         cursor.execute(
-            'UPDATE users SET delivery_count = delivery_count + 1, last_delivery = ? WHERE user_id = ?',
-            (now, user_id)
+            'UPDATE users SET delivery_count = delivery_count + 1, last_delivery_date = ? WHERE user_id = ?',
+            (today, user_id)
         )
         
         conn.commit()
         conn.close()
-        print(f"✅ Incremented delivery count for {user_id[:8]}...")
+        print(f"✅ Incremented delivery count for {user_id[:8]}... (date: {today})")
     except Exception as e:
         print(f"❌ increment_delivery_count error: {e}")
+        import traceback
+        traceback.print_exc()
 
 # ==========================================
 # 応援メッセージフラグ
@@ -172,7 +195,7 @@ def increment_delivery_count(user_id):
 def mark_support_shown(user_id):
     """応援メッセージを表示済みにする"""
     try:
-        conn = get_db()
+        conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         
         cursor.execute(
@@ -294,6 +317,8 @@ def create_news_message(user_id, category):
         return message
     except Exception as e:
         print(f"❌ create_news_message error: {e}")
+        import traceback
+        traceback.print_exc()
         return "ニュースの生成中にエラーが発生しました。"
 
 # ==========================================
@@ -338,35 +363,36 @@ def delivery_job():
     try:
         now = datetime.now(JST)
         current_time = now.strftime("%H:%M")
+        today = date.today().isoformat()
         timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
-        today = now.strftime("%Y-%m-%d")
         
-        print(f"\n⏰ [{timestamp}] Running delivery check for {current_time}")
+        print(f"\n⏰ [{timestamp}] Checking for deliveries at {current_time}")
         
-        # データベースから全ユーザーを取得
-        conn = get_db()
+        # データベースから配信対象のユーザーを取得
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         
-        # 今日まだ配信していないユーザーで、配信時間が現在時刻と一致するユーザーを取得
+        # 今日まだ配信していないユーザーで、配信時間が現在時刻のユーザーを取得
         cursor.execute('''
-            SELECT user_id, genre, delivery_time, last_delivery 
+            SELECT user_id, genre, delivery_time, last_delivery_date 
             FROM users 
             WHERE delivery_time = ?
-            AND (last_delivery IS NULL OR DATE(last_delivery) < ?)
+            AND (last_delivery_date IS NULL OR last_delivery_date != ?)
         ''', (current_time, today))
         
         users = cursor.fetchall()
         conn.close()
         
         if users:
-            print(f"📬 Found {len(users)} user(s) to deliver news:")
-            for row in users:
-                user_id = row['user_id']
-                genre = row['genre']
-                print(f"   → Delivering to {user_id[:8]}... (Genre: {genre})")
+            print(f"📬 Found {len(users)} user(s) for delivery:")
+            for user in users:
+                user_id = user['user_id']
+                genre = user['genre']
+                print(f"   → {user_id[:8]}... | Genre: {genre} | Time: {user['delivery_time']} | Last: {user['last_delivery_date']}")
                 send_news_to_user(user_id, genre)
         else:
-            print(f"   ℹ️  No users scheduled for delivery at {current_time}")
+            print(f"   ℹ️  No deliveries scheduled at {current_time}")
             
     except Exception as e:
         print(f"❌ delivery_job error: {e}")
@@ -382,41 +408,37 @@ def start_scheduler():
     
     try:
         if scheduler is not None:
-            print("⚠️ Scheduler already running")
+            print("⚠️ Scheduler already exists")
             return
         
         scheduler = BackgroundScheduler(timezone=JST)
         
-        # 毎分0秒に実行
+        # 毎分実行
         scheduler.add_job(
             delivery_job,
             'cron',
             minute='*',
-            second='0',
-            id='news_delivery_job',
-            name='News Delivery Check'
+            id='news_delivery',
+            name='News Delivery Job'
         )
         
         scheduler.start()
-        print("✅ Scheduler started successfully!")
-        print(f"⏰ Checking for deliveries every minute")
+        print("✅ Scheduler started - running every minute")
         
-        # 登録ユーザーを表示
-        try:
-            conn = get_db()
-            cursor = conn.cursor()
-            cursor.execute('SELECT user_id, delivery_time, genre, last_delivery FROM users')
-            all_users = cursor.fetchall()
-            conn.close()
-            
-            if all_users:
-                print("\n📋 Registered users:")
-                for row in all_users:
-                    print(f"   {row['user_id'][:8]}... | {row['delivery_time']} | {row['genre']} | Last: {row['last_delivery']}")
-            else:
-                print("\n📋 No users registered yet")
-        except Exception as e:
-            print(f"❌ Failed to load users: {e}")
+        # 登録済みユーザーを表示
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute('SELECT user_id, delivery_time, genre, last_delivery_date FROM users')
+        all_users = cursor.fetchall()
+        conn.close()
+        
+        if all_users:
+            print(f"\n📋 Registered users ({len(all_users)}):")
+            for user in all_users:
+                print(f"   {user['user_id'][:8]}... | {user['delivery_time']} | {user['genre']} | Last: {user['last_delivery_date']}")
+        else:
+            print("\n📋 No users registered yet")
             
     except Exception as e:
         print(f"❌ Scheduler start error: {e}")
@@ -424,13 +446,48 @@ def start_scheduler():
         traceback.print_exc()
 
 # ==========================================
+# スケジューラー停止
+# ==========================================
+def stop_scheduler():
+    """スケジューラーを停止"""
+    global scheduler
+    if scheduler is not None:
+        scheduler.shutdown()
+        print("🛑 Scheduler stopped")
+
+# ==========================================
 # Flask Routes
 # ==========================================
 @app.route("/")
 def index():
     """ヘルスチェック用エンドポイント"""
-    now = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
-    return f"VisAI Bot Running ✅ | Time: {now} JST"
+    now = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S JST")
+    return f"VisAI Bot Running ✅<br>Current Time: {now}"
+
+@app.route("/debug")
+def debug():
+    """デバッグ情報表示"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM users')
+        users = cursor.fetchall()
+        conn.close()
+        
+        html = "<h1>Debug Info</h1>"
+        html += f"<p>Current Time: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S JST')}</p>"
+        html += f"<p>Database Path: {DB_PATH}</p>"
+        html += f"<h2>Users ({len(users)})</h2><table border='1'>"
+        html += "<tr><th>User ID</th><th>Time</th><th>Genre</th><th>Count</th><th>Last Delivery</th></tr>"
+        
+        for user in users:
+            html += f"<tr><td>{user['user_id'][:12]}...</td><td>{user['delivery_time']}</td><td>{user['genre']}</td><td>{user['delivery_count']}</td><td>{user['last_delivery_date']}</td></tr>"
+        
+        html += "</table>"
+        return html
+    except Exception as e:
+        return f"Error: {str(e)}"
 
 @app.route("/settings", methods=['GET', 'POST'])
 def settings():
@@ -482,6 +539,10 @@ def settings():
         if request.method == 'POST':
             new_time = request.form.get('delivery_time')
             new_genre = request.form.get('genre')
+            
+            print(f"\n📝 Saving settings for {user_id[:8]}...")
+            print(f"   Time: {new_time}")
+            print(f"   Genre: {new_genre}")
             
             update_user_settings(user_id, new_time, new_genre)
             
@@ -679,12 +740,6 @@ def settings():
                 }}
                 select {{
                     cursor: pointer;
-                    appearance: none;
-                    background-image: url("data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3e%3cpolyline points='6 9 12 15 18 9'%3e%3c/polyline%3e%3c/svg%3e");
-                    background-repeat: no-repeat;
-                    background-position: right 12px center;
-                    background-size: 20px;
-                    padding-right: 40px;
                 }}
                 button {{
                     width: 100%;
@@ -725,7 +780,7 @@ def settings():
                 <div class="current-settings">
                     現在の設定: <strong>{current_settings['time']}</strong> に <strong>{current_settings['genre']}</strong>ニュース
                 </div>
-                <form method="POST">
+                <form method="POST" action="/settings?user_id={user_id}">
                     <div class="form-group">
                         <label>
                             <span class="label-icon">🕐</span>
@@ -739,7 +794,7 @@ def settings():
                             <span class="label-icon">📰</span>
                             ニュースジャンル
                         </label>
-                        <select name="genre">
+                        <select name="genre" required>
                             {genre_options}
                         </select>
                     </div>
@@ -863,17 +918,27 @@ def handle_message(event):
         import traceback
         traceback.print_exc()
 
+# ==========================================
+# アプリケーション起動
+# ==========================================
 if __name__ == "__main__":
     print("\n" + "=" * 70)
     print("🚀 Starting VisAI LINE Bot")
     print("=" * 70 + "\n")
     
+    # データベース初期化
     init_database()
+    
+    # スケジューラー起動
     start_scheduler()
     
-    startup_time = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
+    # スケジューラーを確実に停止
+    atexit.register(stop_scheduler)
+    
+    startup_time = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S JST")
     print(f"\n{'=' * 70}")
     print(f"✅ Bot started successfully at {startup_time}")
     print(f"{'=' * 70}\n")
     
+    # Flaskアプリ起動
     app.run(host='0.0.0.0', port=10000, debug=False)
