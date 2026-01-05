@@ -86,7 +86,6 @@ def init_database():
         print("✅ Database initialized")
     except Exception as e:
         print(f"❌ Database initialization error: {e}")
-　
 # ==========================================
 # ユーザー設定の取得
 # ==========================================
