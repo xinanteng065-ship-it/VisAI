@@ -1,5 +1,7 @@
 import os
 import sqlite3
+import threading
+import time
 import feedparser
 import random
 from datetime import datetime
@@ -7,12 +9,8 @@ from pytz import timezone
 from flask import Flask, request, abort, render_template_string
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
-from linebot.models import MessageEvent, TextMessage, TextSendMessage, ImageSendMessage
+from linebot.models import MessageEvent, TextMessage, TextSendMessage
 from openai import OpenAI
-from apscheduler.schedulers.background import BackgroundScheduler
-import qrcode
-from io import BytesIO
-import base64
 
 app = Flask(__name__)
 
@@ -24,8 +22,6 @@ LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 APP_PUBLIC_URL = os.environ.get("APP_PUBLIC_URL", "https://visai.onrender.com")
 BOOTH_SUPPORT_URL = "https://visai.booth.pm/items/7763380"
-
-# LINE Bot ID (環境変数から取得、または@で始まるBot IDを設定)
 LINE_BOT_ID = os.environ.get("LINE_BOT_ID", "@298qcfgk")
 
 if not all([LINE_CHANNEL_ACCESS_TOKEN, LINE_CHANNEL_SECRET, OPENAI_API_KEY]):
@@ -36,6 +32,7 @@ webhook_handler = WebhookHandler(LINE_CHANNEL_SECRET)
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
 JST = timezone('Asia/Tokyo')
+DB_PATH = os.path.join(os.path.dirname(__file__), "users.db")
 
 # ニュースカテゴリー
 NEWS_CATEGORIES = {
@@ -51,11 +48,9 @@ NEWS_CATEGORIES = {
 # ==========================================
 # データベース接続
 # ==========================================
-DB_PATH = os.path.join(os.path.dirname(__file__), "users.db")
-
 def get_db():
     """SQLite接続を取得"""
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -75,9 +70,16 @@ def init_database():
                 genre TEXT NOT NULL DEFAULT 'トップ',
                 delivery_count INTEGER DEFAULT 0,
                 support_shown INTEGER DEFAULT 0,
-                last_delivery TEXT
+                last_delivery_date TEXT
             )
         ''')
+        
+        # 既存テーブルに last_delivery_date カラムがない場合は追加
+        try:
+            cursor.execute("SELECT last_delivery_date FROM users LIMIT 1")
+        except sqlite3.OperationalError:
+            cursor.execute("ALTER TABLE users ADD COLUMN last_delivery_date TEXT")
+            print("Added last_delivery_date column")
         
         conn.commit()
         conn.close()
@@ -85,39 +87,36 @@ def init_database():
     except Exception as e:
         print(f"❌ Database initialization error: {e}")
 
-init_database()
-
 # ==========================================
 # ユーザー設定の取得
 # ==========================================
 def get_user_settings(user_id):
-    """ユーザー設定を取得（存在しない場合はデフォルト値で作成）"""
+    """ユーザー設定を取得"""
     try:
         conn = get_db()
         cursor = conn.cursor()
         
         cursor.execute(
-            'SELECT delivery_time, genre, delivery_count, support_shown, last_delivery FROM users WHERE user_id = ?',
+            'SELECT delivery_time, genre, delivery_count, support_shown, last_delivery_date FROM users WHERE user_id = ?',
             (user_id,)
         )
         row = cursor.fetchone()
         
         if not row:
-            # 新規ユーザーの場合はデフォルト値で作成
             cursor.execute(
                 'INSERT INTO users (user_id, delivery_time, genre, delivery_count, support_shown) VALUES (?, ?, ?, ?, ?)',
                 (user_id, '08:00', 'トップ', 0, 0)
             )
             conn.commit()
             conn.close()
-            return {'time': '08:00', 'genre': 'トップ', 'delivery_count': 0, 'support_shown': 0, 'last_delivery': None}
+            return {'time': '08:00', 'genre': 'トップ', 'delivery_count': 0, 'support_shown': 0, 'last_delivery_date': None}
         
         result = {
             'time': row['delivery_time'],
             'genre': row['genre'],
             'delivery_count': row['delivery_count'],
             'support_shown': row['support_shown'],
-            'last_delivery': row['last_delivery']
+            'last_delivery_date': row['last_delivery_date']
         }
         
         conn.close()
@@ -125,9 +124,7 @@ def get_user_settings(user_id):
         
     except Exception as e:
         print(f"❌ get_user_settings error: {e}")
-        import traceback
-        traceback.print_exc()
-        return {'time': '08:00', 'genre': 'トップ', 'delivery_count': 0, 'support_shown': 0, 'last_delivery': None}
+        return {'time': '08:00', 'genre': 'トップ', 'delivery_count': 0, 'support_shown': 0, 'last_delivery_date': None}
 
 # ==========================================
 # ユーザー設定の更新
@@ -156,15 +153,15 @@ def update_user_settings(user_id, delivery_time, genre):
 # 配信回数のカウント
 # ==========================================
 def increment_delivery_count(user_id):
-    """配信回数を1増やし、最終配信時刻を記録"""
+    """配信回数を1増やし、今日の日付を記録"""
     try:
         conn = get_db()
         cursor = conn.cursor()
-        now = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
+        today = datetime.now(JST).strftime("%Y-%m-%d")
         
         cursor.execute(
-            'UPDATE users SET delivery_count = delivery_count + 1, last_delivery = ? WHERE user_id = ?',
-            (now, user_id)
+            'UPDATE users SET delivery_count = delivery_count + 1, last_delivery_date = ? WHERE user_id = ?',
+            (today, user_id)
         )
         
         conn.commit()
@@ -181,50 +178,37 @@ def mark_support_shown(user_id):
     try:
         conn = get_db()
         cursor = conn.cursor()
-        
-        cursor.execute(
-            'UPDATE users SET support_shown = 1 WHERE user_id = ?',
-            (user_id,)
-        )
-        
+        cursor.execute('UPDATE users SET support_shown = 1 WHERE user_id = ?', (user_id,))
         conn.commit()
         conn.close()
     except Exception as e:
         print(f"❌ mark_support_shown error: {e}")
 
 # ==========================================
-# 指定時刻の配信対象ユーザーを取得
+# 配信対象ユーザーを取得
 # ==========================================
-def get_users_for_delivery(hour, minute):
-    """配信時刻が一致するユーザーのリストを返す（重複配信を防ぐ）"""
+def get_users_for_delivery(target_time):
+    """指定時刻に配信すべきユーザーを取得（今日まだ配信していない人のみ）"""
     try:
         conn = get_db()
         cursor = conn.cursor()
         
-        # HH:MM形式に変換
-        target_time = f"{hour:02d}:{minute:02d}"
-        
-        # 今日の日付
         today = datetime.now(JST).strftime("%Y-%m-%d")
-        today_start = f"{today} 00:00:00"
         
-        # 今日まだ配信していないユーザーのみ取得
+        # 今日の日付が last_delivery_date と異なる、または NULL のユーザーを取得
         cursor.execute('''
-            SELECT user_id, genre, delivery_time, last_delivery FROM users 
+            SELECT user_id, genre FROM users 
             WHERE delivery_time = ? 
-            AND (last_delivery IS NULL OR last_delivery < ?)
-        ''', (target_time, today_start))
+            AND (last_delivery_date IS NULL OR last_delivery_date != ?)
+        ''', (target_time, today))
         
         users = cursor.fetchall()
         conn.close()
         
-        print(f"📋 Found {len(users)} user(s) for delivery at {target_time}")
+        return [(row['user_id'], row['genre']) for row in users]
         
-        return [(row[0], row[1]) for row in users]
     except Exception as e:
         print(f"❌ get_users_for_delivery error: {e}")
-        import traceback
-        traceback.print_exc()
         return []
 
 # ==========================================
@@ -339,42 +323,6 @@ def create_news_message(user_id, category):
         return "ニュースの生成中にエラーが発生しました。"
 
 # ==========================================
-# 友だち追加用QRコード生成
-# ==========================================
-def generate_friend_qr():
-    """LINE友だち追加用のQRコードを生成してBase64文字列で返す"""
-    try:
-        # LINE友だち追加URL
-        line_add_url = f"https://line.me/R/ti/p/{LINE_BOT_ID}"
-        
-        # QRコード生成
-        qr = qrcode.QRCode(
-            version=1,
-            error_correction=qrcode.constants.ERROR_CORRECT_L,
-            box_size=10,
-            border=4,
-        )
-        qr.add_data(line_add_url)
-        qr.make(fit=True)
-        
-        # 画像生成
-        img = qr.make_image(fill_color="black", back_color="white")
-        
-        # BytesIOに保存
-        buffer = BytesIO()
-        img.save(buffer, format='PNG')
-        buffer.seek(0)
-        
-        # Base64エンコード
-        img_base64 = base64.b64encode(buffer.getvalue()).decode()
-        
-        return line_add_url, img_base64
-        
-    except Exception as e:
-        print(f"❌ QR generation error: {e}")
-        return None, None
-
-# ==========================================
 # ニュース配信（Push送信）
 # ==========================================
 def send_news_to_user(user_id, category):
@@ -409,75 +357,58 @@ def send_news_to_user(user_id, category):
         traceback.print_exc()
 
 # ==========================================
-# スケジューラーの配信ジョブ
+# スケジューラー（Thread方式）
 # ==========================================
-def delivery_job():
-    """毎分実行される配信チェック処理"""
-    try:
-        now = datetime.now(JST)
-        hour = now.hour
-        minute = now.minute
-        timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
-        
-        print(f"\n⏰ [{timestamp}] Checking deliveries for {hour:02d}:{minute:02d}")
-        
-        users = get_users_for_delivery(hour, minute)
-        
-        if users:
-            print(f"📬 Found {len(users)} user(s) to deliver:")
-            for user_id, genre in users:
-                print(f"   → {user_id[:8]}... ({genre})")
-                send_news_to_user(user_id, genre)
-        else:
-            print(f"   ℹ️  No deliveries scheduled for {hour:02d}:{minute:02d}")
-    except Exception as e:
-        print(f"❌ delivery_job error: {e}")
-        import traceback
-        traceback.print_exc()
-
-# ==========================================
-# スケジューラー起動
-# ==========================================
-def start_scheduler():
-    """APSchedulerを起動"""
-    try:
-        scheduler = BackgroundScheduler(timezone=JST)
-        
-        # 毎分実行
-        scheduler.add_job(
-            delivery_job,
-            'interval',
-            minutes=1,
-            id='news_delivery_job',
-            name='News Delivery Check',
-            next_run_time=datetime.now(JST)
-        )
-        
-        scheduler.start()
-        print("✅ APScheduler started (runs every minute)")
-        print(f"⏰ Next job will run at: {datetime.now(JST).strftime('%H:%M:%S')}")
-        
-        # 登録済みユーザーを表示
+def schedule_checker():
+    """毎分00秒に正確に実行するスケジューラー"""
+    print("🚀 Scheduler thread started")
+    
+    # 起動時に次の分まで待機
+    now = datetime.now(JST)
+    wait_seconds = 60 - now.second
+    print(f"⏱️ Waiting {wait_seconds}s to sync with minute boundary...")
+    time.sleep(wait_seconds)
+    
+    last_checked_minute = None
+    
+    while True:
         try:
-            conn = get_db()
-            cursor = conn.cursor()
-            cursor.execute('SELECT user_id, delivery_time, genre, last_delivery FROM users')
-            all_users = cursor.fetchall()
-            conn.close()
+            now_jst = datetime.now(JST)
+            current_time_str = now_jst.strftime("%H:%M")
+            current_minute_key = now_jst.strftime("%Y%m%d%H%M")
+            timestamp = now_jst.strftime("%Y-%m-%d %H:%M:%S")
             
-            if all_users:
-                print("\n📋 Registered users:")
-                for row in all_users:
-                    uid, dtime, genre, last = row[0], row[1], row[2], row[3]
-                    print(f"   {uid[:8]}... | {dtime} | {genre} | Last: {last}")
+            # 同じ分に複数回実行しないようにチェック
+            if current_minute_key == last_checked_minute:
+                time.sleep(1)
+                continue
+            
+            last_checked_minute = current_minute_key
+            
+            print(f"\n⏰ [{timestamp}] Checking scheduled deliveries for {current_time_str}...")
+            
+            targets = get_users_for_delivery(current_time_str)
+            
+            if targets:
+                print(f"📬 [{timestamp}] Found {len(targets)} user(s) to deliver")
+                for user_id, genre in targets:
+                    print(f"   → User: {user_id[:8]}..., Genre: {genre}")
+                    # 各配信を別スレッドで実行
+                    threading.Thread(target=send_news_to_user, args=(user_id, genre), daemon=True).start()
             else:
-                print("\n📋 No users registered yet")
+                print(f"   ℹ️  No deliveries scheduled for {current_time_str}")
+            
+            # 次の分の00秒まで待機
+            now = datetime.now(JST)
+            wait_seconds = 60 - now.second
+            time.sleep(wait_seconds)
+            
         except Exception as e:
-            print(f"❌ Failed to load users: {e}")
-    except Exception as e:
-        print(f"❌ Scheduler start error: {e}")
-        import traceback
-        traceback.print_exc()
+            error_time = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
+            print(f"❌ [{error_time}] Scheduler error: {e}")
+            import traceback
+            traceback.print_exc()
+            time.sleep(60)
 
 # ==========================================
 # Flask Routes
@@ -846,23 +777,8 @@ def handle_message(event):
             settings = get_user_settings(user_id)
             print(f"🚀 [{timestamp}] Immediate delivery requested by {user_id[:8]}...")
             
-            news_content = create_news_message(user_id, settings['genre'])
-            reply_messages = [TextSendMessage(text=news_content)]
-            
-            if settings['delivery_count'] >= 6 and settings['support_shown'] == 0:
-                support_message = (
-                    "いつもVisAIを使ってくれてありがとうございます！🙏\n\n"
-                    "このbotは中学生の個人開発で、サーバー代やAIの利用料を自腹で運営しています。\n\n"
-                    "もし応援してもいいかなと思ってもらえたら、100円の応援PDFをBoothに置いています。\n"
-                    "無理はしないでください🙏\n\n"
-                    f"↓応援はこちらから\n{BOOTH_SUPPORT_URL}"
-                )
-                reply_messages.append(TextSendMessage(text=support_message))
-                mark_support_shown(user_id)
-                print(f"💝 [{timestamp}] Support message added")
-            
-            line_bot_api.reply_message(event.reply_token, reply_messages)
-            print(f"✅ [{timestamp}] Replied to {user_id[:8]}...")
+            # 別スレッドで配信を実行
+            threading.Thread(target=send_news_to_user, args=(user_id, settings['genre']), daemon=True).start()
             return
         
         # 設定画面へのリンクを送信
@@ -884,7 +800,7 @@ def handle_message(event):
             return
         
         # 友だちに紹介する機能
-        if text == "友だちに紹介する" or text == "友達に紹介する" or text == "紹介":
+        if text in ["友だちに紹介する", "友達に紹介する", "紹介"]:
             line_add_url = f"https://line.me/R/ti/p/{LINE_BOT_ID}"
             
             reply_text = (
@@ -918,6 +834,9 @@ def handle_message(event):
         import traceback
         traceback.print_exc()
 
+# ==========================================
+# アプリケーション起動
+# ==========================================
 if __name__ == "__main__":
     print("\n" + "=" * 70)
     print("🚀 Starting VisAI LINE Bot")
@@ -925,26 +844,13 @@ if __name__ == "__main__":
     
     init_database()
     
-    # スケジューラーを確実に起動
-    import atexit
-    start_scheduler()
-    
-    # シャットダウン時の処理
-    def shutdown_scheduler():
-        print("\n🛑 Shutting down scheduler...")
-    atexit.register(shutdown_scheduler)
+    # スケジューラースレッドを起動
+    scheduler_thread = threading.Thread(target=schedule_checker, daemon=True)
+    scheduler_thread.start()
     
     startup_time = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
     print(f"\n{'=' * 70}")
     print(f"✅ Bot started successfully at {startup_time}")
     print(f"{'=' * 70}\n")
     
-    # Gunicornで動作させる場合もスケジューラーを起動
     app.run(host='0.0.0.0', port=10000, debug=False)
-
-# Gunicorn用: ワーカープロセスでもスケジューラーを起動
-def on_starting(server):
-    """Gunicorn起動時に実行"""
-    print("\n🔧 Gunicorn starting - initializing scheduler...")
-    init_database()
-    start_scheduler()
