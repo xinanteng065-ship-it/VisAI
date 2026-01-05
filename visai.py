@@ -86,7 +86,7 @@ def init_database():
         print("✅ Database initialized")
     except Exception as e:
         print(f"❌ Database initialization error: {e}")
-
+　
 init_database()
 # ==========================================
 # ユーザー設定の取得
@@ -860,22 +860,24 @@ def handle_message(event):
         traceback.print_exc()
 
 # ==========================================
-# アプリケーション起動
+# アプリケーション起動時の初期化（Gunicorn対応）
 # ==========================================
+print("\n" + "=" * 70)
+print("🚀 Initializing VisAI LINE Bot")
+print("=" * 70 + "\n")
+
+init_database()
+
+# スケジューラースレッドを起動（グローバルスコープで実行）
+scheduler_thread = threading.Thread(target=schedule_checker, daemon=True)
+scheduler_thread.start()
+
+startup_time = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
+print(f"\n{'=' * 70}")
+print(f"✅ Bot initialized at {startup_time}")
+print(f"✅ Scheduler thread started")
+print(f"{'=' * 70}\n")
+
 if __name__ == "__main__":
-    print("\n" + "=" * 70)
-    print("🚀 Starting VisAI LINE Bot")
-    print("=" * 70 + "\n")
-    
-    init_database()
-    
-    # スケジューラースレッドを起動
-    scheduler_thread = threading.Thread(target=schedule_checker, daemon=True)
-    scheduler_thread.start()
-    
-    startup_time = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
-    print(f"\n{'=' * 70}")
-    print(f"✅ Bot started successfully at {startup_time}")
-    print(f"{'=' * 70}\n")
-    
+    print("🔧 Running in development mode (Flask built-in server)")
     app.run(host='0.0.0.0', port=10000, debug=False)
