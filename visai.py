@@ -87,6 +87,7 @@ def init_database():
     except Exception as e:
         print(f"❌ Database initialization error: {e}")
 
+init_database()
 # ==========================================
 # ユーザー設定の取得
 # ==========================================
@@ -135,6 +136,9 @@ def update_user_settings(user_id, delivery_time, genre):
         conn = get_db()
         cursor = conn.cursor()
         
+        print(f"🔧 Updating settings for {user_id[:8]}...")
+        print(f"   Requested: time={delivery_time}, genre={genre}")
+        
         cursor.execute('''
             INSERT INTO users (user_id, delivery_time, genre, delivery_count, support_shown)
             VALUES (?, ?, ?, 0, 0)
@@ -144,10 +148,17 @@ def update_user_settings(user_id, delivery_time, genre):
         ''', (user_id, delivery_time, genre))
         
         conn.commit()
+        
+        # 確認のため保存後の値を取得
+        cursor.execute('SELECT delivery_time, genre FROM users WHERE user_id = ?', (user_id,))
+        result = cursor.fetchone()
+        print(f"✅ Verified saved settings: time={result[0]}, genre={result[1]}")
+        
         conn.close()
-        print(f"✅ Updated settings: {user_id[:8]}... -> {delivery_time}, {genre}")
     except Exception as e:
         print(f"❌ update_user_settings error: {e}")
+        import traceback
+        traceback.print_exc()
 
 # ==========================================
 # 配信回数のカウント
@@ -469,7 +480,16 @@ def settings():
             new_time = request.form.get('delivery_time')
             new_genre = request.form.get('genre')
             
+            timestamp = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
+            print(f"\n⚙️ [{timestamp}] Settings update POST received")
+            print(f"   User ID: {user_id[:8]}...")
+            print(f"   Form data: time={new_time}, genre={new_genre}")
+            
             update_user_settings(user_id, new_time, new_genre)
+            
+            # 保存後に再度取得して確認
+            updated = get_user_settings(user_id)
+            print(f"   After save: time={updated['time']}, genre={updated['genre']}")
             
             return """
             <!DOCTYPE html>
@@ -553,6 +573,11 @@ def settings():
             """
         
         current_settings = get_user_settings(user_id)
+        
+        timestamp = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
+        print(f"\n📖 [{timestamp}] Settings page GET accessed")
+        print(f"   User ID: {user_id[:8]}...")
+        print(f"   Current settings: time={current_settings['time']}, genre={current_settings['genre']}")
         
         genre_options = ''
         for genre_name in NEWS_CATEGORIES.keys():
