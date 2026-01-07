@@ -134,8 +134,18 @@ def update_user_settings(user_id, delivery_time, genre):
         conn = get_db()
         cursor = conn.cursor()
         
+        # 時刻フォーマットを確実に HH:MM に統一
+        if delivery_time and ':' in delivery_time:
+            time_parts = delivery_time.split(':')
+            if len(time_parts) >= 2:
+                # ゼロパディングを確実に適用
+                hour = time_parts[0].zfill(2)
+                minute = time_parts[1].zfill(2)
+                delivery_time = f"{hour}:{minute}"
+        
         print(f"🔧 Updating settings for {user_id[:8]}...")
         print(f"   Requested: time={delivery_time}, genre={genre}")
+        print(f"   Time format check: len={len(delivery_time)}, format={'HH:MM' if len(delivery_time) == 5 else 'INVALID'}")
         
         cursor.execute('''
             INSERT INTO users (user_id, delivery_time, genre, delivery_count, support_shown)
@@ -150,7 +160,12 @@ def update_user_settings(user_id, delivery_time, genre):
         # 確認のため保存後の値を取得
         cursor.execute('SELECT delivery_time, genre FROM users WHERE user_id = ?', (user_id,))
         result = cursor.fetchone()
-        print(f"✅ Verified saved settings: time={result[0]}, genre={result[1]}")
+        print(f"✅ Verified saved settings: time='{result[0]}' (len={len(result[0])}), genre='{result[1]}'")
+        
+        # バイナリ比較テスト
+        test_time = "08:00"
+        print(f"🔍 Binary comparison test: '{result[0]}' == '{test_time}' → {result[0] == test_time}")
+        print(f"🔍 Byte representation: {result[0].encode('utf-8')} vs {test_time.encode('utf-8')}")
         
         conn.close()
     except Exception as e:
@@ -395,6 +410,25 @@ def schedule_checker():
             last_checked_minute = current_minute_key
             
             print(f"\n⏰ [{timestamp}] Checking scheduled deliveries for {current_time_str}...")
+            
+            # === デバッグ: 全ユーザーの設定を表示 ===
+            try:
+                conn = get_db()
+                cursor = conn.cursor()
+                cursor.execute('SELECT user_id, delivery_time, genre, last_delivery_date FROM users')
+                all_users = cursor.fetchall()
+                conn.close()
+                
+                print(f"📊 [{timestamp}] All users in database:")
+                for row in all_users:
+                    user_id = row['user_id']
+                    delivery_time = row['delivery_time']
+                    genre = row['genre']
+                    last_date = row['last_delivery_date']
+                    match = "✅ MATCH" if delivery_time == current_time_str else "❌ No match"
+                    print(f"   User: {user_id[:8]}... | Time: {delivery_time} | Genre: {genre} | Last: {last_date} | {match}")
+            except Exception as e:
+                print(f"⚠️ Debug query failed: {e}")
             
             targets = get_users_for_delivery(current_time_str)
             
