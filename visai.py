@@ -130,7 +130,7 @@ def get_user_settings(user_id):
 # ユーザー設定の更新
 # ==========================================
 def update_user_settings(user_id, delivery_time, genre):
-    """配信時間とジャンルを更新"""
+    """配信時間とジャンルを更新（last_delivery_dateもクリア）"""
     try:
         conn = get_db()
         cursor = conn.cursor()
@@ -146,20 +146,22 @@ def update_user_settings(user_id, delivery_time, genre):
         print(f"🔧 Updating settings for {user_id[:8]}...")
         print(f"   Time: '{delivery_time}', Genre: '{genre}'")
         
+        # 設定変更時にlast_delivery_dateをクリアして、同じ日でも再配信可能にする
         cursor.execute('''
-            INSERT INTO users (user_id, delivery_time, genre, delivery_count, support_shown)
-            VALUES (?, ?, ?, 0, 0)
+            INSERT INTO users (user_id, delivery_time, genre, delivery_count, support_shown, last_delivery_date)
+            VALUES (?, ?, ?, 0, 0, NULL)
             ON CONFLICT(user_id) DO UPDATE SET
                 delivery_time = excluded.delivery_time,
-                genre = excluded.genre
+                genre = excluded.genre,
+                last_delivery_date = NULL
         ''', (user_id, delivery_time, genre))
         
         conn.commit()
         
         # 確認
-        cursor.execute('SELECT delivery_time, genre FROM users WHERE user_id = ?', (user_id,))
+        cursor.execute('SELECT delivery_time, genre, last_delivery_date FROM users WHERE user_id = ?', (user_id,))
         result = cursor.fetchone()
-        print(f"✅ Saved: time='{result[0]}', genre='{result[1]}'")
+        print(f"✅ Saved: time='{result[0]}', genre='{result[1]}', last_delivery_date='{result[2]}'")
         
         conn.close()
     except Exception as e:
