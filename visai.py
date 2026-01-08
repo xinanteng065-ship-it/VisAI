@@ -79,13 +79,14 @@ def init_database():
             cursor.execute("SELECT last_delivery_date FROM users LIMIT 1")
         except sqlite3.OperationalError:
             cursor.execute("ALTER TABLE users ADD COLUMN last_delivery_date TEXT")
-            print("Added last_delivery_date column")
+            print("✅ Added last_delivery_date column")
         
         conn.commit()
         conn.close()
         print("✅ Database initialized")
     except Exception as e:
         print(f"❌ Database initialization error: {e}")
+
 # ==========================================
 # ユーザー設定の取得
 # ==========================================
@@ -136,16 +137,14 @@ def update_user_settings(user_id, delivery_time, genre):
         
         # 時刻フォーマットを確実に HH:MM に統一
         if delivery_time and ':' in delivery_time:
-            time_parts = delivery_time.split(':')
-            if len(time_parts) >= 2:
-                # ゼロパディングを確実に適用
-                hour = time_parts[0].zfill(2)
-                minute = time_parts[1].zfill(2)
+            parts = delivery_time.split(':')
+            if len(parts) >= 2:
+                hour = parts[0].strip().zfill(2)
+                minute = parts[1].strip().zfill(2)
                 delivery_time = f"{hour}:{minute}"
         
         print(f"🔧 Updating settings for {user_id[:8]}...")
-        print(f"   Requested: time={delivery_time}, genre={genre}")
-        print(f"   Time format check: len={len(delivery_time)}, format={'HH:MM' if len(delivery_time) == 5 else 'INVALID'}")
+        print(f"   Time: '{delivery_time}', Genre: '{genre}'")
         
         cursor.execute('''
             INSERT INTO users (user_id, delivery_time, genre, delivery_count, support_shown)
@@ -157,15 +156,10 @@ def update_user_settings(user_id, delivery_time, genre):
         
         conn.commit()
         
-        # 確認のため保存後の値を取得
+        # 確認
         cursor.execute('SELECT delivery_time, genre FROM users WHERE user_id = ?', (user_id,))
         result = cursor.fetchone()
-        print(f"✅ Verified saved settings: time='{result[0]}' (len={len(result[0])}), genre='{result[1]}'")
-        
-        # バイナリ比較テスト
-        test_time = "08:00"
-        print(f"🔍 Binary comparison test: '{result[0]}' == '{test_time}' → {result[0] == test_time}")
-        print(f"🔍 Byte representation: {result[0].encode('utf-8')} vs {test_time.encode('utf-8')}")
+        print(f"✅ Saved: time='{result[0]}', genre='{result[1]}'")
         
         conn.close()
     except Exception as e:
@@ -190,7 +184,7 @@ def increment_delivery_count(user_id):
         
         conn.commit()
         conn.close()
-        print(f"✅ Incremented delivery count for {user_id[:8]}...")
+        print(f"✅ Delivery count incremented for {user_id[:8]}...")
     except Exception as e:
         print(f"❌ increment_delivery_count error: {e}")
 
@@ -209,7 +203,7 @@ def mark_support_shown(user_id):
         print(f"❌ mark_support_shown error: {e}")
 
 # ==========================================
-# 配信対象ユーザーを取得
+# 配信対象ユーザーを取得（改善版）
 # ==========================================
 def get_users_for_delivery(target_time):
     """指定時刻に配信すべきユーザーを取得（今日まだ配信していない人のみ）"""
@@ -219,20 +213,35 @@ def get_users_for_delivery(target_time):
         
         today = datetime.now(JST).strftime("%Y-%m-%d")
         
-        # 今日の日付が last_delivery_date と異なる、または NULL のユーザーを取得
+        print(f"🔍 Searching for: time='{target_time}' (len={len(target_time)}), not delivered today")
+        
+        # すべての候補を取得
         cursor.execute('''
-            SELECT user_id, genre FROM users 
-            WHERE delivery_time = ? 
-            AND (last_delivery_date IS NULL OR last_delivery_date != ?)
-        ''', (target_time, today))
+            SELECT user_id, genre, delivery_time FROM users 
+            WHERE (last_delivery_date IS NULL OR last_delivery_date != ?)
+        ''', (today,))
         
-        users = cursor.fetchall()
+        all_candidates = cursor.fetchall()
+        print(f"📊 Candidates not delivered today: {len(all_candidates)}")
+        
+        # Pythonで時刻比較（より確実）
+        matched_users = []
+        for row in all_candidates:
+            db_time = row['delivery_time'].strip()
+            
+            if db_time == target_time:
+                matched_users.append((row['user_id'], row['genre']))
+                print(f"   ✅ MATCH: {row['user_id'][:8]}... | '{db_time}' == '{target_time}'")
+            else:
+                print(f"   ❌ No match: {row['user_id'][:8]}... | '{db_time}' != '{target_time}'")
+        
         conn.close()
-        
-        return [(row['user_id'], row['genre']) for row in users]
+        return matched_users
         
     except Exception as e:
         print(f"❌ get_users_for_delivery error: {e}")
+        import traceback
+        traceback.print_exc()
         return []
 
 # ==========================================
@@ -381,37 +390,41 @@ def send_news_to_user(user_id, category):
         traceback.print_exc()
 
 # ==========================================
-# スケジューラー（Thread方式）
+# スケジューラー（改善版 - より正確な時刻同期）
 # ==========================================
 def schedule_checker():
     """毎分00秒に正確に実行するスケジューラー"""
     print("🚀 Scheduler thread started")
     
-    # 起動時に次の分まで待機
+    # 起動時に次の分の00秒まで待機
     now = datetime.now(JST)
-    wait_seconds = 60 - now.second
-    print(f"⏱️ Waiting {wait_seconds}s to sync with minute boundary...")
-    time.sleep(wait_seconds)
+    seconds_to_wait = 60 - now.second
+    if now.microsecond > 0:
+        seconds_to_wait -= now.microsecond / 1000000.0
+    
+    print(f"⏱️ Waiting {seconds_to_wait:.2f}s to sync with next minute...")
+    time.sleep(seconds_to_wait)
     
     last_checked_minute = None
     
     while True:
         try:
+            # 現在時刻を取得
             now_jst = datetime.now(JST)
             current_time_str = now_jst.strftime("%H:%M")
             current_minute_key = now_jst.strftime("%Y%m%d%H%M")
-            timestamp = now_jst.strftime("%Y-%m-%d %H:%M:%S")
+            timestamp = now_jst.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
             
             # 同じ分に複数回実行しないようにチェック
             if current_minute_key == last_checked_minute:
-                time.sleep(1)
+                time.sleep(0.5)
                 continue
             
             last_checked_minute = current_minute_key
             
-            print(f"\n⏰ [{timestamp}] Checking scheduled deliveries for {current_time_str}...")
+            print(f"\n⏰ [{timestamp}] Checking deliveries for {current_time_str}")
             
-            # === デバッグ: 全ユーザーの設定を表示 ===
+            # デバッグ: 全ユーザーの設定を表示
             try:
                 conn = get_db()
                 cursor = conn.cursor()
@@ -419,32 +432,48 @@ def schedule_checker():
                 all_users = cursor.fetchall()
                 conn.close()
                 
-                print(f"📊 [{timestamp}] All users in database:")
+                print(f"📊 Total users: {len(all_users)}")
                 for row in all_users:
                     user_id = row['user_id']
-                    delivery_time = row['delivery_time']
+                    delivery_time = row['delivery_time'].strip()
                     genre = row['genre']
                     last_date = row['last_delivery_date']
-                    match = "✅ MATCH" if delivery_time == current_time_str else "❌ No match"
-                    print(f"   User: {user_id[:8]}... | Time: {delivery_time} | Genre: {genre} | Last: {last_date} | {match}")
+                    
+                    match = delivery_time == current_time_str
+                    today = datetime.now(JST).strftime("%Y-%m-%d")
+                    already_delivered = (last_date == today)
+                    
+                    status = "✅ DELIVER" if (match and not already_delivered) else "⏭️ Skip"
+                    if match and already_delivered:
+                        status = "✓ Already sent"
+                    
+                    print(f"   {status} | User: {user_id[:8]}... | Time: '{delivery_time}' | Genre: {genre} | Last: {last_date}")
             except Exception as e:
                 print(f"⚠️ Debug query failed: {e}")
             
+            # 配信対象を取得
             targets = get_users_for_delivery(current_time_str)
             
             if targets:
-                print(f"📬 [{timestamp}] Found {len(targets)} user(s) to deliver")
+                print(f"📬 Found {len(targets)} user(s) to deliver")
                 for user_id, genre in targets:
-                    print(f"   → User: {user_id[:8]}..., Genre: {genre}")
+                    print(f"   → Delivering to {user_id[:8]}... ({genre})")
                     # 各配信を別スレッドで実行
                     threading.Thread(target=send_news_to_user, args=(user_id, genre), daemon=True).start()
             else:
-                print(f"   ℹ️  No deliveries scheduled for {current_time_str}")
+                print(f"   ℹ️ No deliveries for {current_time_str}")
             
-            # 次の分の00秒まで待機
+            # 次の分の00秒まで正確に待機
             now = datetime.now(JST)
-            wait_seconds = 60 - now.second
-            time.sleep(wait_seconds)
+            seconds_to_wait = 60 - now.second
+            if now.microsecond > 0:
+                seconds_to_wait -= now.microsecond / 1000000.0
+            
+            # 最低でも1秒は待機
+            if seconds_to_wait < 1:
+                seconds_to_wait = 60 + seconds_to_wait
+            
+            time.sleep(seconds_to_wait)
             
         except Exception as e:
             error_time = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
@@ -518,10 +547,6 @@ def settings():
             print(f"   Form data: time={new_time}, genre={new_genre}")
             
             update_user_settings(user_id, new_time, new_genre)
-            
-            # 保存後に再度取得して確認
-            updated = get_user_settings(user_id)
-            print(f"   After save: time={updated['time']}, genre={updated['genre']}")
             
             return """
             <!DOCTYPE html>
