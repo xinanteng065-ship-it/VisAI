@@ -62,7 +62,7 @@ def init_database():
     try:
         conn = get_db()
         cursor = conn.cursor()
-        
+
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 user_id TEXT PRIMARY KEY,
@@ -73,14 +73,14 @@ def init_database():
                 last_delivery_date TEXT
             )
         ''')
-        
+
         # 既存テーブルに last_delivery_date カラムがない場合は追加
         try:
             cursor.execute("SELECT last_delivery_date FROM users LIMIT 1")
         except sqlite3.OperationalError:
             cursor.execute("ALTER TABLE users ADD COLUMN last_delivery_date TEXT")
             print("✅ Added last_delivery_date column")
-        
+
         conn.commit()
         conn.close()
         print("✅ Database initialized")
@@ -95,13 +95,13 @@ def get_user_settings(user_id):
     try:
         conn = get_db()
         cursor = conn.cursor()
-        
+
         cursor.execute(
             'SELECT delivery_time, genre, delivery_count, support_shown, last_delivery_date FROM users WHERE user_id = ?',
             (user_id,)
         )
         row = cursor.fetchone()
-        
+
         if not row:
             cursor.execute(
                 'INSERT INTO users (user_id, delivery_time, genre, delivery_count, support_shown) VALUES (?, ?, ?, ?, ?)',
@@ -110,7 +110,7 @@ def get_user_settings(user_id):
             conn.commit()
             conn.close()
             return {'time': '08:00', 'genre': 'トップ', 'delivery_count': 0, 'support_shown': 0, 'last_delivery_date': None}
-        
+
         result = {
             'time': row['delivery_time'],
             'genre': row['genre'],
@@ -118,10 +118,10 @@ def get_user_settings(user_id):
             'support_shown': row['support_shown'],
             'last_delivery_date': row['last_delivery_date']
         }
-        
+
         conn.close()
         return result
-        
+
     except Exception as e:
         print(f"❌ get_user_settings error: {e}")
         return {'time': '08:00', 'genre': 'トップ', 'delivery_count': 0, 'support_shown': 0, 'last_delivery_date': None}
@@ -130,11 +130,12 @@ def get_user_settings(user_id):
 # ユーザー設定の更新
 # ==========================================
 def update_user_settings(user_id, delivery_time, genre):
+    """配信時間とジャンルを更新"""
     """配信時間とジャンルを更新（last_delivery_dateもクリア）"""
     try:
         conn = get_db()
         cursor = conn.cursor()
-        
+
         # 時刻フォーマットを確実に HH:MM に統一
         if delivery_time and ':' in delivery_time:
             parts = delivery_time.split(':')
@@ -142,27 +143,32 @@ def update_user_settings(user_id, delivery_time, genre):
                 hour = parts[0].strip().zfill(2)
                 minute = parts[1].strip().zfill(2)
                 delivery_time = f"{hour}:{minute}"
-        
+
         print(f"🔧 Updating settings for {user_id[:8]}...")
         print(f"   Time: '{delivery_time}', Genre: '{genre}'")
-        
+
         # 設定変更時にlast_delivery_dateをクリアして、同じ日でも再配信可能にする
         cursor.execute('''
+            INSERT INTO users (user_id, delivery_time, genre, delivery_count, support_shown)
+            VALUES (?, ?, ?, 0, 0)
             INSERT INTO users (user_id, delivery_time, genre, delivery_count, support_shown, last_delivery_date)
             VALUES (?, ?, ?, 0, 0, NULL)
             ON CONFLICT(user_id) DO UPDATE SET
                 delivery_time = excluded.delivery_time,
+                genre = excluded.genre
                 genre = excluded.genre,
                 last_delivery_date = NULL
         ''', (user_id, delivery_time, genre))
-        
+
         conn.commit()
-        
+
         # 確認
+        cursor.execute('SELECT delivery_time, genre FROM users WHERE user_id = ?', (user_id,))
         cursor.execute('SELECT delivery_time, genre, last_delivery_date FROM users WHERE user_id = ?', (user_id,))
         result = cursor.fetchone()
+        print(f"✅ Saved: time='{result[0]}', genre='{result[1]}'")
         print(f"✅ Saved: time='{result[0]}', genre='{result[1]}', last_delivery_date='{result[2]}'")
-        
+
         conn.close()
     except Exception as e:
         print(f"❌ update_user_settings error: {e}")
@@ -178,12 +184,12 @@ def increment_delivery_count(user_id):
         conn = get_db()
         cursor = conn.cursor()
         today = datetime.now(JST).strftime("%Y-%m-%d")
-        
+
         cursor.execute(
             'UPDATE users SET delivery_count = delivery_count + 1, last_delivery_date = ? WHERE user_id = ?',
             (today, user_id)
         )
-        
+
         conn.commit()
         conn.close()
         print(f"✅ Delivery count incremented for {user_id[:8]}...")
@@ -212,34 +218,34 @@ def get_users_for_delivery(target_time):
     try:
         conn = get_db()
         cursor = conn.cursor()
-        
+
         today = datetime.now(JST).strftime("%Y-%m-%d")
-        
+
         print(f"🔍 Searching for: time='{target_time}' (len={len(target_time)}), not delivered today")
-        
+
         # すべての候補を取得
         cursor.execute('''
             SELECT user_id, genre, delivery_time FROM users 
             WHERE (last_delivery_date IS NULL OR last_delivery_date != ?)
         ''', (today,))
-        
+
         all_candidates = cursor.fetchall()
         print(f"📊 Candidates not delivered today: {len(all_candidates)}")
-        
+
         # Pythonで時刻比較（より確実）
         matched_users = []
         for row in all_candidates:
             db_time = row['delivery_time'].strip()
-            
+
             if db_time == target_time:
                 matched_users.append((row['user_id'], row['genre']))
                 print(f"   ✅ MATCH: {row['user_id'][:8]}... | '{db_time}' == '{target_time}'")
             else:
                 print(f"   ❌ No match: {row['user_id'][:8]}... | '{db_time}' != '{target_time}'")
-        
+
         conn.close()
         return matched_users
-        
+
     except Exception as e:
         print(f"❌ get_users_for_delivery error: {e}")
         import traceback
@@ -252,18 +258,18 @@ def get_users_for_delivery(target_time):
 def fetch_news(category):
     """指定カテゴリーのニュースをランダムに1件＋関連5件取得"""
     url = NEWS_CATEGORIES.get(category, NEWS_CATEGORIES["トップ"])
-    
+
     try:
         feed = feedparser.parse(url)
-        
+
         if not feed.entries:
             return None, []
-        
+
         main_article = random.choice(feed.entries[:10])
-        related_articles = [e for e in feed.entries if e.link != main_article.link][:5]
-        
+        related_articles = [e for e in feed.entries if e.link != main_article.link][1:6]
+
         return main_article, related_articles
-        
+
     except Exception as e:
         print(f"❌ RSS fetch error: {e}")
         return None, []
@@ -278,7 +284,7 @@ def analyze_news_with_ai(article, category):
         "1つのニュースを深く掘り下げ、多角的な視点から分析し、"
         "中学生でも理解しやすい文章で解説してください。"
     )
-    
+
     user_prompt = f"""以下のニュース記事について、深掘り分析を行ってください。
 
 ### 記事情報:
@@ -308,6 +314,7 @@ def analyze_news_with_ai(article, category):
 このニュースについて、両方の視点を踏まえた上での簡潔なまとめを2〜3文で記述してください。
 
 注意事項:
+- 550文字程度でまとめてください
 - "###"や"**"などは使わないでください（絵文字などは使っても大丈夫です。）
 - 各セクションの間に空行を入れて読みやすくしてください
 - 専門用語は必要に応じて簡単に説明してください
@@ -326,7 +333,7 @@ def analyze_news_with_ai(article, category):
             temperature=0.7
         )
         return response.choices[0].message.content.strip()
-        
+
     except Exception as e:
         print(f"❌ OpenAI API Error: {e}")
         return "申し訳ありません。AIによる分析の生成に失敗しました。"
@@ -338,20 +345,20 @@ def create_news_message(user_id, category):
     """ニュース本文を作成"""
     try:
         main_article, related_articles = fetch_news(category)
-        
+
         if not main_article:
             return "申し訳ありません。現在ニュースが取得できませんでした。"
-        
+
         analysis = analyze_news_with_ai(main_article, category)
         message = f"{analysis}\n\n🔗 詳細記事はこちら\n{main_article.link}"
-        
+
         if related_articles:
             message += "\n\n━━━━━━━━━━━━━━━━\n📰 その他の関連ニュース\n"
             for i, article in enumerate(related_articles, 1):
                 message += f"\n{i}. {article.title}\n{article.link}\n"
-        
+
         increment_delivery_count(user_id)
-        
+
         return message
     except Exception as e:
         print(f"❌ create_news_message error: {e}")
@@ -363,13 +370,13 @@ def create_news_message(user_id, category):
 def send_news_to_user(user_id, category):
     """ユーザーにニュースをPush送信"""
     timestamp = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
-    
+
     try:
         print(f"📤 [{timestamp}] Sending news to {user_id[:8]}... (Genre: {category})")
-        
+
         news_content = create_news_message(user_id, category)
         messages = [TextSendMessage(text=news_content)]
-        
+
         settings = get_user_settings(user_id)
         if settings['delivery_count'] >= 6 and settings['support_shown'] == 0:
             support_message = (
@@ -382,10 +389,10 @@ def send_news_to_user(user_id, category):
             messages.append(TextSendMessage(text=support_message))
             mark_support_shown(user_id)
             print(f"💝 [{timestamp}] Support message added")
-        
+
         line_bot_api.push_message(user_id, messages)
         print(f"✅ [{timestamp}] Successfully sent to {user_id[:8]}...")
-        
+
     except Exception as e:
         print(f"❌ [{timestamp}] Push error: {e}")
         import traceback
@@ -397,18 +404,18 @@ def send_news_to_user(user_id, category):
 def schedule_checker():
     """毎分00秒に正確に実行するスケジューラー"""
     print("🚀 Scheduler thread started")
-    
+
     # 起動時に次の分の00秒まで待機
     now = datetime.now(JST)
     seconds_to_wait = 60 - now.second
     if now.microsecond > 0:
         seconds_to_wait -= now.microsecond / 1000000.0
-    
+
     print(f"⏱️ Waiting {seconds_to_wait:.2f}s to sync with next minute...")
     time.sleep(seconds_to_wait)
-    
+
     last_checked_minute = None
-    
+
     while True:
         try:
             # 現在時刻を取得
@@ -416,16 +423,16 @@ def schedule_checker():
             current_time_str = now_jst.strftime("%H:%M")
             current_minute_key = now_jst.strftime("%Y%m%d%H%M")
             timestamp = now_jst.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-            
+
             # 同じ分に複数回実行しないようにチェック
             if current_minute_key == last_checked_minute:
                 time.sleep(0.5)
                 continue
-            
+
             last_checked_minute = current_minute_key
-            
+
             print(f"\n⏰ [{timestamp}] Checking deliveries for {current_time_str}")
-            
+
             # デバッグ: 全ユーザーの設定を表示
             try:
                 conn = get_db()
@@ -433,29 +440,29 @@ def schedule_checker():
                 cursor.execute('SELECT user_id, delivery_time, genre, last_delivery_date FROM users')
                 all_users = cursor.fetchall()
                 conn.close()
-                
+
                 print(f"📊 Total users: {len(all_users)}")
                 for row in all_users:
                     user_id = row['user_id']
                     delivery_time = row['delivery_time'].strip()
                     genre = row['genre']
                     last_date = row['last_delivery_date']
-                    
+
                     match = delivery_time == current_time_str
                     today = datetime.now(JST).strftime("%Y-%m-%d")
                     already_delivered = (last_date == today)
-                    
+
                     status = "✅ DELIVER" if (match and not already_delivered) else "⏭️ Skip"
                     if match and already_delivered:
                         status = "✓ Already sent"
-                    
+
                     print(f"   {status} | User: {user_id[:8]}... | Time: '{delivery_time}' | Genre: {genre} | Last: {last_date}")
             except Exception as e:
                 print(f"⚠️ Debug query failed: {e}")
-            
+
             # 配信対象を取得
             targets = get_users_for_delivery(current_time_str)
-            
+
             if targets:
                 print(f"📬 Found {len(targets)} user(s) to deliver")
                 for user_id, genre in targets:
@@ -464,19 +471,19 @@ def schedule_checker():
                     threading.Thread(target=send_news_to_user, args=(user_id, genre), daemon=True).start()
             else:
                 print(f"   ℹ️ No deliveries for {current_time_str}")
-            
+
             # 次の分の00秒まで正確に待機
             now = datetime.now(JST)
             seconds_to_wait = 60 - now.second
             if now.microsecond > 0:
                 seconds_to_wait -= now.microsecond / 1000000.0
-            
+
             # 最低でも1秒は待機
             if seconds_to_wait < 1:
                 seconds_to_wait = 60 + seconds_to_wait
-            
+
             time.sleep(seconds_to_wait)
-            
+
         except Exception as e:
             error_time = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
             print(f"❌ [{error_time}] Scheduler error: {e}")
@@ -497,7 +504,7 @@ def settings():
     """設定画面"""
     try:
         user_id = request.args.get('user_id')
-        
+
         if not user_id:
             return """
             <!DOCTYPE html>
@@ -538,18 +545,18 @@ def settings():
             </body>
             </html>
             """, 400
-        
+
         if request.method == 'POST':
             new_time = request.form.get('delivery_time')
             new_genre = request.form.get('genre')
-            
+
             timestamp = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
             print(f"\n⚙️ [{timestamp}] Settings update POST received")
             print(f"   User ID: {user_id[:8]}...")
             print(f"   Form data: time={new_time}, genre={new_genre}")
-            
+
             update_user_settings(user_id, new_time, new_genre)
-            
+
             return """
             <!DOCTYPE html>
             <html>
@@ -630,19 +637,19 @@ def settings():
             </body>
             </html>
             """
-        
+
         current_settings = get_user_settings(user_id)
-        
+
         timestamp = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
         print(f"\n📖 [{timestamp}] Settings page GET accessed")
         print(f"   User ID: {user_id[:8]}...")
         print(f"   Current settings: time={current_settings['time']}, genre={current_settings['genre']}")
-        
+
         genre_options = ''
         for genre_name in NEWS_CATEGORIES.keys():
             selected = 'selected' if genre_name == current_settings['genre'] else ''
             genre_options += f'<option value="{genre_name}" {selected}>{genre_name}</option>'
-        
+
         html = f"""
         <!DOCTYPE html>
         <html>
@@ -819,9 +826,9 @@ def settings():
         </body>
         </html>
         """
-        
+
         return render_template_string(html)
-    
+
     except Exception as e:
         print(f"❌ Settings page error: {e}")
         import traceback
@@ -834,7 +841,7 @@ def callback():
     try:
         signature = request.headers.get("X-Line-Signature")
         body = request.get_data(as_text=True)
-        
+
         webhook_handler.handle(body, signature)
         return "OK"
     except InvalidSignatureError:
@@ -853,40 +860,40 @@ def handle_message(event):
         user_id = event.source.user_id
         text = event.message.text.strip()
         timestamp = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
-        
+
         print(f"💬 [{timestamp}] Message from {user_id[:8]}...: '{text}'")
-        
+
         # 今すぐニュースを配信
         if text == "今すぐ":
             settings = get_user_settings(user_id)
             print(f"🚀 [{timestamp}] Immediate delivery requested by {user_id[:8]}...")
-            
+
             # 別スレッドで配信を実行
             threading.Thread(target=send_news_to_user, args=(user_id, settings['genre']), daemon=True).start()
             return
-        
+
         # 設定画面へのリンクを送信
         if text == "設定":
             settings_url = f"{APP_PUBLIC_URL}/settings?user_id={user_id}"
-            
+
             reply_text = (
                 "⚙️ 設定\n"
                 "以下のリンクから配信時間とジャンルを変更できます。\n\n"
                 f"{settings_url}\n\n"
                 "※リンクを知っている人は誰でも設定を変更できてしまうため、他人に教えないでください。"
             )
-            
+
             line_bot_api.reply_message(
                 event.reply_token,
                 TextSendMessage(text=reply_text)
             )
             print(f"⚙️ [{timestamp}] Settings link sent to {user_id[:8]}...")
             return
-        
+
         # 友だちに紹介する機能
         if text in ["友だちに紹介する", "友達に紹介する", "紹介"]:
             line_add_url = f"https://line.me/R/ti/p/{LINE_BOT_ID}"
-            
+
             reply_text = (
                 "📢 友だちに紹介\n\n"
                 "VisAIを友だちに紹介していただきありがとうございます！\n\n"
@@ -898,21 +905,21 @@ def handle_message(event):
                 "③ 「今すぐ」でニュースを受け取れます\n\n"
                 "💡 紹介してくれると開発の励みになります！"
             )
-            
+
             line_bot_api.reply_message(
                 event.reply_token,
                 TextSendMessage(text=reply_text)
             )
             print(f"👥 [{timestamp}] Friend referral sent to {user_id[:8]}...")
             return
-        
+
         # デフォルトのヘルプメニュー
         line_bot_api.reply_message(
             event.reply_token,
             TextSendMessage(text="💡メニュー\n・「今すぐ」: 今すぐニュースを受信\n・「設定」: 時間やジャンルを変更\n・「友だちに紹介する」: 友だちに紹介")
         )
         print(f"ℹ️ [{timestamp}] Help menu sent to {user_id[:8]}...")
-        
+
     except Exception as e:
         print(f"❌ handle_message error: {e}")
         import traceback
