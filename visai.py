@@ -325,7 +325,7 @@ def analyze_news_with_ai(article, category):
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            max_tokens=550,
+            max_completion_tokens=550,
             temperature=0.7
         )
         return response.choices[0].message.content.strip()
