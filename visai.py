@@ -130,7 +130,6 @@ def get_user_settings(user_id):
 # ユーザー設定の更新
 # ==========================================
 def update_user_settings(user_id, delivery_time, genre):
-    """配信時間とジャンルを更新"""
     """配信時間とジャンルを更新（last_delivery_dateもクリア）"""
     try:
         conn = get_db()
@@ -149,13 +148,10 @@ def update_user_settings(user_id, delivery_time, genre):
 
         # 設定変更時にlast_delivery_dateをクリアして、同じ日でも再配信可能にする
         cursor.execute('''
-            INSERT INTO users (user_id, delivery_time, genre, delivery_count, support_shown)
-            VALUES (?, ?, ?, 0, 0)
             INSERT INTO users (user_id, delivery_time, genre, delivery_count, support_shown, last_delivery_date)
             VALUES (?, ?, ?, 0, 0, NULL)
             ON CONFLICT(user_id) DO UPDATE SET
                 delivery_time = excluded.delivery_time,
-                genre = excluded.genre
                 genre = excluded.genre,
                 last_delivery_date = NULL
         ''', (user_id, delivery_time, genre))
@@ -163,10 +159,8 @@ def update_user_settings(user_id, delivery_time, genre):
         conn.commit()
 
         # 確認
-        cursor.execute('SELECT delivery_time, genre FROM users WHERE user_id = ?', (user_id,))
         cursor.execute('SELECT delivery_time, genre, last_delivery_date FROM users WHERE user_id = ?', (user_id,))
         result = cursor.fetchone()
-        print(f"✅ Saved: time='{result[0]}', genre='{result[1]}'")
         print(f"✅ Saved: time='{result[0]}', genre='{result[1]}', last_delivery_date='{result[2]}'")
 
         conn.close()
@@ -253,10 +247,10 @@ def get_users_for_delivery(target_time):
         return []
 
 # ==========================================
-# ニュース取得
+# ニュース取得（修正版）
 # ==========================================
 def fetch_news(category):
-    """指定カテゴリーのニュースをランダムに1件＋関連5件取得"""
+    """指定カテゴリーのニュースをランダムに1件＋同ジャンルの別ニュース5件取得"""
     url = NEWS_CATEGORIES.get(category, NEWS_CATEGORIES["トップ"])
 
     try:
@@ -265,8 +259,11 @@ def fetch_news(category):
         if not feed.entries:
             return None, []
 
+        # メインニュースをランダムに選択
         main_article = random.choice(feed.entries[:10])
-        related_articles = [e for e in feed.entries if e.link != main_article.link][1:6]
+        
+        # 関連ニュース：メインニュース以外の同ジャンルニュースを5件取得
+        related_articles = [e for e in feed.entries if e.link != main_article.link][:5]
 
         return main_article, related_articles
 
@@ -314,7 +311,7 @@ def analyze_news_with_ai(article, category):
 このニュースについて、両方の視点を踏まえた上での簡潔なまとめを2〜3文で記述してください。
 
 注意事項:
-- 550文字程度でまとめてください
+- 500文字程度でまとめてください
 - "###"や"**"などは使わないでください（絵文字などは使っても大丈夫です。）
 - 各セクションの間に空行を入れて読みやすくしてください
 - 専門用語は必要に応じて簡単に説明してください
@@ -339,10 +336,10 @@ def analyze_news_with_ai(article, category):
         return "申し訳ありません。AIによる分析の生成に失敗しました。"
 
 # ==========================================
-# ニュースメッセージ作成
+# ニュースメッセージ作成（修正版）
 # ==========================================
 def create_news_message(user_id, category):
-    """ニュース本文を作成"""
+    """ニュース本文を作成（同ジャンルの別ニュースリンク付き）"""
     try:
         main_article, related_articles = fetch_news(category)
 
@@ -353,7 +350,7 @@ def create_news_message(user_id, category):
         message = f"{analysis}\n\n🔗 詳細記事はこちら\n{main_article.link}"
 
         if related_articles:
-            message += "\n\n━━━━━━━━━━━━━━━━\n📰 その他の関連ニュース\n"
+            message += f"\n\n━━━━━━━━━━━━━━━━\n📰 その他の{category}ニュース\n"
             for i, article in enumerate(related_articles, 1):
                 message += f"\n{i}. {article.title}\n{article.link}\n"
 
