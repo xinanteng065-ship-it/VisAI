@@ -307,10 +307,10 @@ def analyze_news_with_ai(article, category):
 それぞれの意見について、どのような問題点があるのか具体的に説明してください。
 
 6. 【💡 まとめ】
-このニュースについて、両方の視点を踏まえた上での簡潔なまとめを2〜3文で記述してください。
+このニュースについて、両方の視点を踏まえた上での簡潔なまとめを1~2文で記述してください。
 
 注意事項:
-- 500文字程度でまとめてください
+- 350~400文字程度でまとめてください
 - "###"や"**"などは使わないでください（絵文字などは使っても大丈夫です。）
 - 各セクションの間に空行を入れて読みやすくしてください
 - 専門用語は必要に応じて簡単に説明してください
@@ -325,7 +325,7 @@ def analyze_news_with_ai(article, category):
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            max_completion_tokens=550,
+            max_completion_tokens=500,
             temperature=0.7
         )
         return response.choices[0].message.content.strip()
