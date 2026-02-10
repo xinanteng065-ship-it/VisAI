@@ -320,12 +320,13 @@ def analyze_news_with_ai(article, category):
 
     try:
         response = openai_client.chat.completions.create(
-            model="gpt-5-nano",
+            model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            max_completion_tokens=550
+            max_completion_tokens=550,
+            temperature=0.7
         )
         return response.choices[0].message.content.strip()
 
