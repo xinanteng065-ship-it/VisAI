@@ -277,9 +277,8 @@ def fetch_news(category):
 def analyze_news_with_ai(article, category):
     """AIでニュースを深掘り分析"""
     system_prompt = (
-        "あなたは中立公正で信頼されるニュース解説アナリストです。"
-        "1つのニュースを深く掘り下げ、多角的な視点から分析し、"
-        "中学生でも理解しやすい文章で解説してください。"
+        "あなたは中立的で分かりやすくニュースを解説するアナリストです。"
+    "中学生でも理解できる言葉を使い、感情的にならず、多角的な視点で説明してください。"
     )
 
     user_prompt = f"""以下のニュース記事について、深掘り分析を行ってください。
@@ -300,11 +299,11 @@ def analyze_news_with_ai(article, category):
 このニュースの背景や詳細な内容を3〜4文で丁寧に説明してください。
 
 4. 【👍 評価している意見】
-このニュースに対して肯定的・評価する立場からの意見を2〜3点挙げてください。
+このニュースに対して肯定的・評価する立場からの意見を1~2点挙げてください。
 それぞれの意見について、なぜそう考えられるのか理由も含めて説明してください。
 
 5. 【🤔 反対している意見】
-このニュースに対して批判的・懸念を示す立場からの意見を2〜3点挙げてください。
+このニュースに対して批判的・懸念を示す立場からの意見を1~2点挙げてください。
 それぞれの意見について、どのような問題点があるのか具体的に説明してください。
 
 6. 【💡 まとめ】
@@ -321,12 +320,12 @@ def analyze_news_with_ai(article, category):
 
     try:
         response = openai_client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-5-nano",
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            max_tokens=600,
+            max_tokens=550,
             temperature=0.7
         )
         return response.choices[0].message.content.strip()
