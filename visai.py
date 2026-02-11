@@ -326,7 +326,7 @@ def analyze_news_with_ai(article, category):
                 {"role": "user", "content": user_prompt}
             ],
             max_completion_tokens=500,
-            temperature=0.7
+            temperature=0.6
         )
         return response.choices[0].message.content.strip()
 
@@ -376,7 +376,7 @@ def send_news_to_user(user_id, category):
         settings = get_user_settings(user_id)
         if settings['delivery_count'] >= 6 and settings['support_shown'] == 0:
             support_message = (
-                "いつもVisAIを使ってくれてありがとうございます！🙏\n\n"
+                "いつもぽすとんを使ってくれてありがとうございます！🙏\n\n"
                 "このbotは中学生の個人開発で、サーバー代やAIの利用料を自腹で運営しています。\n\n"
                 "もし応援してもいいかなと思ってもらえたら、100円の応援PDFをBoothに置いています。\n"
                 "無理はしないでください🙏\n\n"
@@ -652,7 +652,7 @@ def settings():
         <head>
             <meta charset="UTF-8">
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>ニュース配信設定 - VisAI</title>
+            <title>ニュース配信設定 - ぽすとん</title>
             <style>
                 * {{
                     margin: 0;
@@ -892,7 +892,7 @@ def handle_message(event):
 
             reply_text = (
                 "📢 友だちに紹介\n\n"
-                "VisAIを友だちに紹介していただきありがとうございます！\n\n"
+                "ぽすとんを友だちに紹介していただきありがとうございます！\n\n"
                 "以下のリンクを友だちに転送してください👇\n\n"
                 f"🔗 友だち追加リンク\n{line_add_url}\n\n"
                 "📱 使い方\n"
